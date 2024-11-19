@@ -1,7 +1,10 @@
 #include "stdio.h"
 #include "HardwareSerial.h"
 
+uint16_t hexDumpCounter = 0;
+
 void hexDump(const void* object, long size) {
+  hexDumpCounter++;
   unsigned int i;
   const unsigned char* const px = (unsigned char*)object;
   char buf[130];
@@ -10,7 +13,7 @@ void hexDump(const void* object, long size) {
   for (i = 0; i < size; ++i) {
     if (i % (sizeof(int) * 8) == 0) {
       if (offset) {  // offset from previous lines
-        Serial.println(buf);
+        Serial.printf("[%u] %s\n", hexDumpCounter, buf);
       }
       offset = sprintf(buf, "%08X     ", i);  // offset
     } else if (i % 4 == 0) {
@@ -20,6 +23,6 @@ void hexDump(const void* object, long size) {
   }
 
   if (offset) {  // remaining offset
-    Serial.println(buf);
+    Serial.printf("%u %s\n", hexDumpCounter, buf);
   }
 }

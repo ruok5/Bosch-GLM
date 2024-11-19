@@ -12,3 +12,4 @@ This was later ported to a python program, that allowed me to run the program di
 - https://github.com/lz1asl/CaveSurvey/issues/150 - where a user describes the commands that should be sent
 - https://github.com/philipptrenz/BOSCH-GLM-rangefinder - this did not work for me on the specific model that I have. I'm not sure why — I'm running macos ventura 13.3.1.
 - https://devzone.nordicsemi.com/f/nordic-q-a/80589/sniffing-a-bosch-laser-tape-2/337766
+- https://www.b4x.com/android/forum/threads/bosch-distance-laser-glm-serie.160011/page-3#posts - A thread where another user is hacking on the same rangefinder
