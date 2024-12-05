@@ -1,11 +1,28 @@
+// 16:16:46.918 > I2C device found at address 0x1E
+// 16:16:46.926 > I2C device found at address 0x5D
+// 16:16:46.929 > I2C device found at address 0x6B
+#include <Adafruit_LIS3MDL.h>
+#include <Adafruit_Sensor.h>
 #include <Arduino.h>
 #include <BleKeyboard.h>
+#include <Button2.h>
 #include <NimBLEDevice.h>
-#include "Button2.h"
+#include <SPI.h>
+#include <TFT_eSPI.h>  // Graphics and font library for ST7735 driver chip
+#include <Wire.h>
+#include <ansi.h>
+#include <glm.h>
+#include "prefs.h"
 #include "utils.h"
 
+#define TFT_GREY      0xBDF7
 #define SCAN_DURATION 5  // seconds
+
+TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h
+
+Button2 button0(0);
 Button2 button1(35);
+
 BleKeyboard bleKeyboard("Bosch keyboard");
 NimBLEAdvertisedDevice* advertisedDevice         = nullptr;
 bool doConnect                                   = false;
@@ -14,6 +31,12 @@ NimBLEClient* client                             = nullptr;
 
 NimBLEUUID serviceUUID("02a6c0d0-0451-4000-b000-fb3210111989");
 NimBLEUUID characteristicUUID("02a6c0d1-0451-4000-b000-fb3210111989");
+
+ANSI ansi(&Serial);
+
+Adafruit_LIS3MDL lis3mdl;
+
+TickType_t xLastWakeTime;
 
 void onNotificationReceived(NimBLERemoteCharacteristic* characteristic, uint8_t* data, size_t length, bool isNotify) {
   hexDump(data, length);
@@ -62,14 +85,16 @@ class ClientCallbacks : public NimBLEClientCallbacks {
     }
   }
 
-  void onDisconnect(NimBLEClient* client) override {
+  void onDisconnect(NimBLEClient* _client) override {
     Serial.println("Disconnected from device.");
-    client = nullptr;
+    client    = nullptr;
     doConnect = true;
+    tft.fillScreen(TFT_BLACK);
 
     NimBLEDevice::getScan()->start(SCAN_DURATION);
   }
 };
+
 class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
   void onResult(NimBLEAdvertisedDevice* device) override {
     if (device->haveServiceUUID() && device->isAdvertisingService(serviceUUID)) {
@@ -86,33 +111,85 @@ class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
 
 void button1Handler(Button2& btn) {
   Serial.println("Button1 - laser on");
-  if (remoteCharacteristic) {
-    uint8_t message[5];
-    message[0] = 0xc0;
-    message[1] = 0x56;  // command - 86 "Do Remote Trigger Button"
-    message[2] = 0x01;  // the button number
-    message[3] = 0x00;  // payload size
-    message[4] = 0x1e;  // checksum
-    Serial.println("buttonPress");
-    hexDump(message, sizeof(message));
-    remoteCharacteristic->writeValue(message, sizeof(message), true);
-  }
+  glm_buttonPress(remoteCharacteristic);
 }
+
+bool prefsLoaded = false;
+prefs_t preferences;
 
 void setup() {
   Serial.begin(115200);
+  prefsLoaded = readPrefsFromEEPROM(preferences);
+  if (!prefsLoaded) {
+    Serial.println("Failed to load preferences from EEPROM");
+  }
+
+  tft.init();
+  tft.setRotation(0);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setFreeFont(&FreeMono18pt7b);
 
   Serial.println("ESP32 BLE");
-  bleKeyboard.begin();
-  button1.setClickHandler(button1Handler);
 
-  // NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // Max power for long range
+  if (!lis3mdl.begin_I2C(0x1e)) {
+    Serial.println("Failed to find LIS3MDL chip");
+    while (1) {
+      delay(10);
+    }
+  }
+
+  lis3mdl.setPerformanceMode(LIS3MDL_MEDIUMMODE);
+  lis3mdl.setDataRate(lis3mdl_dataRate_t::LIS3MDL_DATARATE_5_HZ);
+  lis3mdl.setOperationMode(lis3mdl_operationmode_t::LIS3MDL_CONTINUOUSMODE);
+  lis3mdl.setRange(lis3mdl_range_t::LIS3MDL_RANGE_16_GAUSS);
+
+  bleKeyboard.begin();
+  button0.setTapHandler([](Button2& btn) {
+    if (button1.isPressed()) {
+      tft.fillScreen(TFT_BLACK);
+      drawResetIcon(tft);
+
+      clearPrefsInEEPROM();
+      delay(1000);
+      ESP.restart();
+    }
+  });
+
+  button1.setTapHandler([](Button2& btn) {
+    if (button0.isPressed()) {
+      tft.fillScreen(TFT_BLACK);
+      drawResetIcon(tft);
+
+      clearPrefsInEEPROM();
+      delay(1000);
+      ESP.restart();
+    }
+  });
+
   NimBLEScan* pScan = NimBLEDevice::getScan();
   pScan->setActiveScan(true);
   pScan->setInterval(100);
   pScan->setWindow(99);
   pScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks());
   pScan->start(SCAN_DURATION);
+
+  xLastWakeTime = xTaskGetTickCount();
+
+  xTaskCreate(
+      [](void* pvParameters) {
+        Serial.println("Button task started");
+        while (1) {
+          button0.loop();
+          button1.loop();
+          vTaskDelay(10);
+        }
+      },
+      "buttonTask",
+      1024 * 8,
+      NULL,
+      1,
+      NULL);
 }
 
 bool connectToBoschGLM() {
@@ -128,24 +205,101 @@ bool connectToBoschGLM() {
     return false;
   }
 }
+
+void initializePreferencesWorkflow(TFT_eSPI& tft, prefs_t& prefs) {
+  Serial.println("Initializing preferences workflow");
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK, false);
+  displayMessageWithCountdown(tft, "Neutral", "Position", 5);
+
+  drawRecordIcon(tft);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK, true);
+  prefs.neutralPositionMag = captureMagValues(tft, lis3mdl);
+  tft.fillScreen(TFT_GREY);
+  tft.setTextColor(TFT_WHITE, TFT_GREY, false);
+  displayMessageWithCountdown(tft, "Position", "Captured", 0);
+  delay(3000);
+
+  Serial.printf("Neutral position set to: %.1f\n", prefs.neutralPositionMag);
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK, false);
+  displayMessageWithCountdown(tft, "Trigger", "Position", 5);
+
+  drawRecordIcon(tft);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK, true);
+  prefs.triggerPositionMag = captureMagValues(tft, lis3mdl);
+  tft.fillScreen(TFT_GREY);
+  tft.setTextColor(TFT_WHITE, TFT_GREY, false);
+  displayMessageWithCountdown(tft, "Position", "Captured", 0);
+  delay(3000);
+
+  writePrefsToEEPROM(prefs);
+  prefsLoaded = true;
+
+  tft.fillScreen(TFT_BLACK);
+  Serial.printf("Trigger position set to: %.1f\n", prefs.triggerPositionMag);
+}
+TriggerStatus lastStatus              = TriggerStatus::UNKNOWN;
+unsigned long closeToTriggerStartTime = 0;
+bool messagePrinted                   = false;
+bool laserIsOn                        = false;
+
 void loop() {
-  // wait here for scan to complete, and for a connection to be established
+  if (!prefsLoaded) {
+    initializePreferencesWorkflow(tft, preferences);
+  }
 
-  while (!doConnect) {
-    if (client && client->isConnected()) {
-      button1.loop();
+  if (prefsLoaded) {
+    while (!doConnect) {
+      if (client && client->isConnected()) {
+        drawBTIcon(tft);
+        float mag = measureMag(tft, lis3mdl);
+
+        TriggerStatus currentStatus =
+            getTriggerStatus(tft, mag, preferences.neutralPositionMag, preferences.triggerPositionMag);
+
+        if (lastStatus == TriggerStatus::IN_BETWEEN && currentStatus == TriggerStatus::CLOSE_TO_TRIGGER) {
+          Serial.println("Transitioned to CLOSE_TO_TRIGGER");
+          closeToTriggerStartTime = millis();
+          messagePrinted          = false;
+          if (!laserIsOn) {
+            glm_buttonPress(remoteCharacteristic);
+            laserIsOn = true;
+          }
+        }
+
+        if (currentStatus == TriggerStatus::CLOSE_TO_TRIGGER) {
+          if (!messagePrinted && (millis() - closeToTriggerStartTime > 2000)) {
+            glm_buttonPress(remoteCharacteristic);
+            laserIsOn = false;
+            Serial.println("Stayed in CLOSE_TO_TRIGGER for over 2000ms");
+            messagePrinted = true;
+          }
+        }
+
+        if (currentStatus == TriggerStatus::CLOSE_TO_NEUTRAL || currentStatus == TriggerStatus::OUTSIDE_RANGE) {
+          if (laserIsOn) {
+            glm_laserOff(remoteCharacteristic);
+            laserIsOn = false;
+          }
+        }
+
+        lastStatus = currentStatus;
+      }
     }
-    delay(10);
+
+    doConnect = false;
+
+    if (connectToBoschGLM()) {
+      Serial.println("Success! we should now be getting notifications, scanning for more!");
+    } else {
+      Serial.println("Failed to connect, starting scan");
+    }
+
+    NimBLEDevice::getScan()->start(SCAN_DURATION);
+    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(SAMPLE_RATE_MS));
   }
-
-  doConnect = false;
-
-  if (connectToBoschGLM()) {
-    Serial.println("Success! we should now be getting notifications, scanning for more!");
-  } else {
-    Serial.println("Failed to connect, starting scan");
-  }
-
-  NimBLEDevice::getScan()->start(SCAN_DURATION);
-  delay(10);
 }
