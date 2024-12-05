@@ -4,12 +4,11 @@
 #ifndef UTILS_H
 #  define UTILS_H
 
-const int W_PATTERN_DURATION_MS = 2000;
-const int SAMPLE_RATE_MS        = 100;
-const int W_PATTERN_SAMPLES     = W_PATTERN_DURATION_MS / SAMPLE_RATE_MS * 1.2;
+const int SAMPLE_RATE_MS = 250;
 
 enum TriggerStatus { UNKNOWN, CLOSE_TO_TRIGGER, CLOSE_TO_NEUTRAL, IN_BETWEEN, OUTSIDE_RANGE };
 
+const char* triggerStatusToString(TriggerStatus status);
 void hexDump(const void* object, long size);
 
 void displayMessageWithCountdown(TFT_eSPI& tft, const char* msgLine1, const char* msgLine2, uint8_t timeoutSeconds);

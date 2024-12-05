@@ -10,15 +10,16 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>  // Graphics and font library for ST7735 driver chip
 #include <Wire.h>
-#include <ansi.h>
 #include <glm.h>
 #include "prefs.h"
+#include "shutdown_timer.h"
 #include "utils.h"
 
 #define TFT_GREY      0xBDF7
 #define SCAN_DURATION 5  // seconds
 
 TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h
+ShutdownTimer shutdownTimer(120000);
 
 Button2 button0(0);
 Button2 button1(35);
@@ -31,8 +32,6 @@ NimBLEClient* client                             = nullptr;
 
 NimBLEUUID serviceUUID("02a6c0d0-0451-4000-b000-fb3210111989");
 NimBLEUUID characteristicUUID("02a6c0d1-0451-4000-b000-fb3210111989");
-
-ANSI ansi(&Serial);
 
 Adafruit_LIS3MDL lis3mdl;
 
@@ -60,10 +59,10 @@ void onNotificationReceived(NimBLERemoteCharacteristic* characteristic, uint8_t*
     }
   }
 }
-
 class ClientCallbacks : public NimBLEClientCallbacks {
   void onConnect(NimBLEClient* client) override {
     Serial.println("Connected to the device.");
+    shutdownTimer.stop();  // Stop the shutdown timer on successful connection
 
     NimBLERemoteService* remoteService = client->getService(serviceUUID);
     if (remoteService != nullptr) {
@@ -72,8 +71,12 @@ class ClientCallbacks : public NimBLEClientCallbacks {
         Serial.println("Characteristic found and stored.");
 
         if (remoteCharacteristic->canIndicate()) {
-          remoteCharacteristic->subscribe(false, onNotificationReceived);
+          bool subscribed = remoteCharacteristic->subscribe(false, onNotificationReceived);
           Serial.println("Subscribed to characteristic notifications.");
+
+          if (subscribed) {
+            remoteCharacteristic->writeValue({0xc0, 0x55, 0x02, 0x01, 0x00, 0x1a}, false);
+          }
         } else {
           Serial.println("Characteristic does not support notifications.");
         }
@@ -92,6 +95,7 @@ class ClientCallbacks : public NimBLEClientCallbacks {
     tft.fillScreen(TFT_BLACK);
 
     NimBLEDevice::getScan()->start(SCAN_DURATION);
+    shutdownTimer.start();  // Restart the shutdown timer on disconnection
   }
 };
 
@@ -123,6 +127,7 @@ void setup() {
   if (!prefsLoaded) {
     Serial.println("Failed to load preferences from EEPROM");
   }
+  shutdownTimer.start();
 
   tft.init();
   tft.setRotation(0);
@@ -182,6 +187,7 @@ void setup() {
         while (1) {
           button0.loop();
           button1.loop();
+          shutdownTimer.loop();
           vTaskDelay(10);
         }
       },
@@ -260,6 +266,17 @@ void loop() {
 
         TriggerStatus currentStatus =
             getTriggerStatus(tft, mag, preferences.neutralPositionMag, preferences.triggerPositionMag);
+
+        if (currentStatus != lastStatus) {
+          Serial.printf("Transitioned from %s to %s\n",
+                        triggerStatusToString(lastStatus),
+                        triggerStatusToString(currentStatus));
+        }
+
+        if (lastStatus == TriggerStatus::CLOSE_TO_NEUTRAL && currentStatus == TriggerStatus::IN_BETWEEN) {
+          glm_laserOff(remoteCharacteristic);
+          laserIsOn = false;
+        }
 
         if (lastStatus == TriggerStatus::IN_BETWEEN && currentStatus == TriggerStatus::CLOSE_TO_TRIGGER) {
           Serial.println("Transitioned to CLOSE_TO_TRIGGER");

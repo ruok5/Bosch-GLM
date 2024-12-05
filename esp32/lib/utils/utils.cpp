@@ -166,3 +166,14 @@ TriggerStatus getTriggerStatus(TFT_eSPI& tft, float sensorReading, float neutral
     return OUTSIDE_RANGE;
   }
 }
+
+const char* triggerStatusToString(TriggerStatus status) {
+  switch (status) {
+    case UNKNOWN: return "UNKNOWN";
+    case CLOSE_TO_TRIGGER: return "CLOSE_TO_TRIGGER";
+    case CLOSE_TO_NEUTRAL: return "CLOSE_TO_NEUTRAL";
+    case IN_BETWEEN: return "IN_BETWEEN";
+    case OUTSIDE_RANGE: return "OUTSIDE_RANGE";
+    default: return "INVALID_STATUS";
+  }
+}
