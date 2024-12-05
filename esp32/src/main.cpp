@@ -4,16 +4,21 @@
 #include <Adafruit_LIS3MDL.h>
 #include <Adafruit_Sensor.h>
 #include <Arduino.h>
+#include <Battery.h>
 #include <BleKeyboard.h>
 #include <Button2.h>
 #include <NimBLEDevice.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>  // Graphics and font library for ST7735 driver chip
 #include <Wire.h>
+#include <esp_adc_cal.h>
 #include <glm.h>
 #include "prefs.h"
 #include "shutdown_timer.h"
 #include "utils.h"
+
+#define ADC_EN  14  // ADC_EN is the ADC detection enable port
+#define ADC_PIN 34
 
 #define TFT_GREY      0xBDF7
 #define SCAN_DURATION 5  // seconds
@@ -23,7 +28,7 @@ ShutdownTimer shutdownTimer(120000);
 
 Button2 button0(0);
 Button2 button1(35);
-
+Battery batt = Battery(3000, 4200, ADC_PIN);
 BleKeyboard bleKeyboard("Bosch keyboard");
 NimBLEAdvertisedDevice* advertisedDevice         = nullptr;
 bool doConnect                                   = false;
@@ -120,6 +125,7 @@ void button1Handler(Button2& btn) {
 
 bool prefsLoaded = false;
 prefs_t preferences;
+int vref = 1100;
 
 void setup() {
   Serial.begin(115200);
@@ -127,6 +133,24 @@ void setup() {
   if (!prefsLoaded) {
     Serial.println("Failed to load preferences from EEPROM");
   }
+
+  esp_adc_cal_characteristics_t adc_chars;
+  esp_adc_cal_value_t val_type =
+      esp_adc_cal_characterize(ADC_UNIT_1,
+                               ADC_ATTEN_DB_11,
+                               ADC_WIDTH_BIT_12,
+                               1100,
+                               &adc_chars);  // Check type of calibration value used to characterize ADC
+  if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
+    Serial.printf("eFuse Vref:%u mV\n", adc_chars.vref);
+    vref = adc_chars.vref;
+  } else if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
+    Serial.printf("Two Point --> coeff_a:%umV coeff_b:%umV\n", adc_chars.coeff_a, adc_chars.coeff_b);
+  } else {
+    Serial.println("Default Vref: 1100mV");
+  }
+
+  batt.begin(vref, 2.0, &sigmoidal);
   shutdownTimer.start();
 
   tft.init();
@@ -188,6 +212,7 @@ void setup() {
           button0.loop();
           button1.loop();
           shutdownTimer.loop();
+          bleKeyboard.setBatteryLevel(batt.level());
           vTaskDelay(10);
         }
       },
