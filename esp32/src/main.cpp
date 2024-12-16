@@ -59,7 +59,7 @@ void onNotificationReceived(NimBLERemoteCharacteristic* characteristic, uint8_t*
 
     Serial.printf("Got length %.3fm\r\n", buf.f);
     if (buf.f != 0 && bleKeyboard.isConnected()) {
-      bleKeyboard.printf("%.3f", buf.f);
+      bleKeyboard.printf("%d", (int)(buf.f * 1000));
       bleKeyboard.write(KEY_RETURN);
     }
   }
