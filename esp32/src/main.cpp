@@ -314,10 +314,10 @@ void loop() {
         }
 
         if (currentStatus == TriggerStatus::CLOSE_TO_TRIGGER) {
-          if (!messagePrinted && (millis() - closeToTriggerStartTime > 2000)) {
+          if (!messagePrinted && (millis() - closeToTriggerStartTime > 1000)) {
             glm_buttonPress(remoteCharacteristic);
             laserIsOn = false;
-            Serial.println("Stayed in CLOSE_TO_TRIGGER for over 2000ms");
+            Serial.println("Stayed in CLOSE_TO_TRIGGER for over 1000ms");
             messagePrinted = true;
           }
         }
