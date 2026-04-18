@@ -11,7 +11,7 @@ to your terminal (and optionally your clipboard).
 > Python rewrite that drops the ESP32 firmware side and focuses on a
 > macOS-friendly CLI workflow. Go star the original.
 
-Tested on a Bosch GLM 50 C on macOS. Should work on any GLM that
+Tested on a Bosch GLM165-27C6 on macOS. Should work on any GLM that
 advertises the same BLE service UUID (prefix `02a6c0…`); YMMV on other
 models.
 
@@ -34,7 +34,7 @@ models.
 - macOS (the clipboard integration uses `pbcopy`; everything else is
   cross-platform via [`bleak`](https://github.com/hbldh/bleak))
 - Python 3.10+
-- A Bosch GLM with Bluetooth (e.g. GLM 50 C)
+- A Bosch GLM with Bluetooth (e.g. GLM165-27C6)
 
 ## Install
 
