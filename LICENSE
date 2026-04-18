@@ -1,0 +1,26 @@
+This repository is a derivative work of:
+
+    ketan/Bosch-GLM50C-Rangefinder
+    https://github.com/ketan/Bosch-GLM50C-Rangefinder
+
+The upstream project is published without a license, so the portions of
+this repository that originate from upstream remain © their original
+author (ketan) with all rights reserved. They are used here under the
+fork/contribution conventions of the GitHub Terms of Service.
+
+Modifications, additions, and new code by Brad <brad@fyvm.org> (GitHub:
+ruok5) are released under the terms below:
+
+            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+                    Version 2, December 2004
+
+ Copyright (C) 2004 Sam Hocevar <sam@hocevar.net>
+
+ Everyone is permitted to copy and distribute verbatim or modified
+ copies of this license document, and changing it is allowed as long
+ as the name is changed.
+
+            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+
+  0. You just DO WHAT THE FUCK YOU WANT TO.
