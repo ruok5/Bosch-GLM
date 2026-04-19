@@ -15,10 +15,12 @@ from textual.widgets import (
 )
 
 from ..ble import CHAR_UUID, stream_frames
+from .. import feedback
 from ..format import (
     IN_PER_M, copy_to_clipboard, displayed_inches, format_imperial,
     fractional_inches, render_big,
 )
+from ..gestures import ErrorErrorTracker
 from ..protocol.constants import FrameType
 from ..protocol.frame import encode
 from ..protocol.messages import (
@@ -27,7 +29,9 @@ from ..protocol.messages import (
     edc_request_history_item, get_settings_request,
 )
 from ..sites import load_sites, nearest_site
+from ..station import StationClosed, StationTracker
 from ..store import LocationFix, Store
+from .screens import StationReviewScreen
 
 logger = logging.getLogger(__name__)
 
@@ -114,19 +118,26 @@ class GlmApp(App):
         Binding("o", "set_offset", "Offset"),
         Binding("r", "refresh_history", "Refresh"),
         Binding("s", "fetch_settings", "Sync settings"),
+        Binding("l", "review_station", "Review station"),
+        Binding("D", "toggle_deleted", "Show/hide deleted"),
+        Binding("U", "undelete_last", "Undelete"),
     ]
 
     connected: reactive[bool] = reactive(False)
     device_name: reactive[str] = reactive("...")
     last_measurement: reactive[EDCMeasurement | None] = reactive(None, layout=False)
+    last_deleted_meas_id: reactive[int | None] = reactive(None, layout=False)
     offset_in: reactive[float] = reactive(0.0)
     settings: reactive[DeviceSettings | None] = reactive(None, layout=False)
     has_warnings: reactive[bool] = reactive(False)
     catchup_status: reactive[str] = reactive("")
+    station_status: reactive[str] = reactive("")
+    show_deleted: reactive[bool] = reactive(False)
 
     def __init__(self, store: Store, offset_in: float = 0.0,
                  catchup: bool = False, use_location: bool = True,
-                 sites_path=None) -> None:
+                 sites_path=None, station_idle_s: float = 60.0,
+                 gestures: bool = True) -> None:
         super().__init__()
         self.store = store
         self.set_reactive(GlmApp.offset_in, offset_in)
@@ -138,11 +149,15 @@ class GlmApp(App):
         self.location: LocationFix | None = None
         self.site_name: str | None = None
         self._error_clear_timer = None
+        self.station = StationTracker(idle_window_ms=int(station_idle_s * 1000))
+        self.err_tracker = ErrorErrorTracker(window_ms=3000) if gestures else None
+        self._last_closed_station: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield StatusBar("○ Looking for your GLM…", id="status")
         yield CatchupBanner("", id="catchup", classes="hidden")
+        yield CatchupBanner("", id="station-banner", classes="hidden")
         yield ReadingPanel("", id="reading")
         with Horizontal(classes="lower"):
             yield DataTable(id="history", zebra_stripes=True, cursor_type="row")
@@ -153,7 +168,7 @@ class GlmApp(App):
         self.title = "Bosch GLM"
         self.sub_title = f"offset {self.offset_in:+g}\""
         table = self.query_one("#history", DataTable)
-        table.add_columns("Time", "Result", "Imperial", "Mode", "ID")
+        table.add_columns("Time", "Result", "Imperial", "Mode", "ID", "Label")
         self._reload_history()
         self.run_worker(self._ble_loop(), exclusive=True, name="ble")
 
@@ -170,6 +185,14 @@ class GlmApp(App):
 
     def watch_catchup_status(self, value: str) -> None:
         banner = self.query_one("#catchup", CatchupBanner)
+        if value:
+            banner.update(value)
+            banner.remove_class("hidden")
+        else:
+            banner.add_class("hidden")
+
+    def watch_station_status(self, value: str) -> None:
+        banner = self.query_one("#station-banner", CatchupBanner)
         if value:
             banner.update(value)
             banner.remove_class("hidden")
@@ -265,17 +288,24 @@ class GlmApp(App):
     def _reload_history(self) -> None:
         table = self.query_one("#history", DataTable)
         table.clear()
-        rows = self.store.conn.execute(
-            "SELECT meas_id, dev_mode, result_m, captured_at "
-            "FROM measurements ORDER BY captured_at DESC LIMIT ?",
-            (HISTORY_LIMIT,),
-        ).fetchall()
-        for meas_id, dev_mode, result_m, captured_at in rows:
-            ts = datetime.fromtimestamp(captured_at / 1000).strftime("%H:%M:%S")
-            table.add_row(
-                ts, f"{result_m:.4f} m", format_imperial(result_m),
-                str(dev_mode), str(meas_id),
-            )
+        sql = ("SELECT meas_id, dev_mode, result_m, captured_at, deleted_at, station_label "
+               "FROM measurements")
+        params: list = []
+        if not self.show_deleted:
+            sql += " WHERE deleted_at IS NULL"
+        sql += " ORDER BY captured_at DESC LIMIT ?"
+        params.append(HISTORY_LIMIT)
+        rows = self.store.conn.execute(sql, params).fetchall()
+        for r in rows:
+            ts = datetime.fromtimestamp(r["captured_at"] / 1000).strftime("%H:%M:%S")
+            res_str = f"{r['result_m']:.4f} m"
+            imp_str = format_imperial(r["result_m"])
+            label = r["station_label"] or ""
+            if r["deleted_at"]:
+                res_str = f"[strike dim]{res_str}[/strike dim]"
+                imp_str = f"[strike dim]{imp_str}[/strike dim]"
+            table.add_row(ts, res_str, imp_str, str(r["dev_mode"]),
+                          str(r["meas_id"]), label)
 
     # Textual DataTable has no insert-at-top API. For ~50 rows the cheapest
     # correct way to keep newest-first is to clear and re-query the store on
@@ -329,20 +359,48 @@ class GlmApp(App):
                     or len(frame.payload) < 16):
                 continue
             m = EDCMeasurement.from_payload(frame.payload)
+            now_ms = int(datetime.now().timestamp() * 1000)
             if m.is_error:
                 self._show_error(int(m.result))
+                # Error-error gesture: 2 errors within 3s → soft delete last good
+                if self.err_tracker is not None:
+                    trigger = self.err_tracker.on_error(now_ms)
+                    if trigger and self.device_address and trigger.device_address:
+                        if self.store.soft_delete(trigger.device_address, trigger.meas_id):
+                            self.last_deleted_meas_id = trigger.meas_id
+                            self.notify(
+                                f"Soft-deleted measurement #{trigger.meas_id}",
+                                severity="warning",
+                            )
+                            if self.client is not None:
+                                asyncio.create_task(feedback.double_beep(self.client))
+                            self._reload_history()
                 continue
             if not m.is_meaningful:
                 # Update warning flags from heartbeats
                 self.has_warnings = m.batt_warning or m.temp_warning
                 continue
+            # Station tracking
+            events = self.station.feed(m.meas_id, now_ms)
+            for ev in events:
+                if isinstance(ev, StationClosed) and len(ev.member_meas_ids) > 1:
+                    self._last_closed_station = ev.station_id
+                    self.station_status = (
+                        f"Station of {len(ev.member_meas_ids)} ready to review (l)"
+                    )
+                    if self.client is not None:
+                        asyncio.create_task(feedback.beep(self.client))
+            sid = self.station._open_id
             if self.device_address:
                 self.store.insert(
                     self.device_address, m,
                     offset_in=self.offset_in,
                     location=self.location,
                     site_name=self.site_name,
+                    station_id=sid,
                 )
+            if self.err_tracker is not None and self.device_address:
+                self.err_tracker.on_good(m.meas_id, self.device_address, now_ms)
             self.has_warnings = m.batt_warning or m.temp_warning
             self.last_measurement = m
             self._reload_history()
@@ -518,12 +576,61 @@ class GlmApp(App):
             return
         asyncio.create_task(self._send_get_settings(self.client))
 
+    # -- station + soft-delete actions --------------------------------------
+
+    def action_review_station(self) -> None:
+        sid = self._last_closed_station
+        if sid is None:
+            # Maybe an open station — close it manually for review
+            close_ev = self.station.force_close()
+            if close_ev is None:
+                self.notify("No station to review yet.", severity="warning")
+                return
+            sid = close_ev.station_id
+        members = self.store.station_members(sid)
+        if not members:
+            self.notify(f"No members for station {sid}.", severity="warning")
+            return
+
+        def apply_labels(labels: dict[int, str | None], confirmed: bool) -> None:
+            if self.device_address is None:
+                return
+            for meas_id, label in labels.items():
+                self.store.set_station_label(self.device_address, meas_id, label)
+            if confirmed:
+                self.store.confirm_station(sid)
+                self.notify(f"Station {sid} confirmed ({len(labels)} labeled).")
+                if self.client is not None:
+                    asyncio.create_task(feedback.beep(self.client))
+            else:
+                self.notify(f"Station {sid} saved as draft.")
+            self._reload_history()
+            self.station_status = ""
+
+        self.push_screen(StationReviewScreen(sid, members, apply_labels))
+
+    def action_toggle_deleted(self) -> None:
+        self.show_deleted = not self.show_deleted
+        self._reload_history()
+        self.notify(f"Show deleted: {'on' if self.show_deleted else 'off'}")
+
+    def action_undelete_last(self) -> None:
+        if self.last_deleted_meas_id is None or self.device_address is None:
+            self.notify("Nothing to undelete.", severity="warning")
+            return
+        if self.store.undelete(self.device_address, self.last_deleted_meas_id):
+            self.notify(f"Undeleted measurement #{self.last_deleted_meas_id}.")
+            self.last_deleted_meas_id = None
+            self._reload_history()
+
 
 def run_tui(offset_in: float = 0.0, catchup: bool = False,
-            use_location: bool = True, sites_path=None) -> None:
+            use_location: bool = True, sites_path=None,
+            station_idle_s: float = 60.0, gestures: bool = True) -> None:
     store = Store()
     try:
         GlmApp(store=store, offset_in=offset_in, catchup=catchup,
-               use_location=use_location, sites_path=sites_path).run()
+               use_location=use_location, sites_path=sites_path,
+               station_idle_s=station_idle_s, gestures=gestures).run()
     finally:
         store.close()
