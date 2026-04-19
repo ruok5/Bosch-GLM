@@ -149,9 +149,13 @@ class GlmApp(App):
         self.location: LocationFix | None = None
         self.site_name: str | None = None
         self._error_clear_timer = None
+        self.station_idle_s = station_idle_s
         self.station = StationTracker(idle_window_ms=int(station_idle_s * 1000))
         self.err_tracker = ErrorErrorTracker(window_ms=3000) if gestures else None
         self._last_closed_station: int | None = None
+        self._station_close_timer = None
+        self._station_open_at_ts_ms: int | None = None
+        self._station_countdown_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -384,12 +388,9 @@ class GlmApp(App):
             events = self.station.feed(m.meas_id, now_ms)
             for ev in events:
                 if isinstance(ev, StationClosed) and len(ev.member_meas_ids) > 1:
-                    self._last_closed_station = ev.station_id
-                    self.station_status = (
-                        f"Station of {len(ev.member_meas_ids)} ready to review (l)"
-                    )
-                    if self.client is not None:
-                        asyncio.create_task(feedback.beep(self.client))
+                    self._handle_station_closed(ev)
+            self._station_open_at_ts_ms = now_ms
+            self._reschedule_station_close()
             sid = self.station._open_id
             if self.device_address:
                 self.store.insert(
@@ -404,6 +405,60 @@ class GlmApp(App):
             self.has_warnings = m.batt_warning or m.temp_warning
             self.last_measurement = m
             self._reload_history()
+
+    # -- station close timer + countdown ------------------------------------
+
+    def _handle_station_closed(self, ev: StationClosed) -> None:
+        self._last_closed_station = ev.station_id
+        self.station_status = (
+            f"Station of {len(ev.member_meas_ids)} ready to review (l)"
+        )
+        if self.client is not None:
+            asyncio.create_task(feedback.beep(self.client))
+        self._stop_station_countdown()
+
+    def _reschedule_station_close(self) -> None:
+        # Cancel any pending close timer; arm a new one for the full idle window.
+        if self._station_close_timer is not None:
+            self._station_close_timer.stop()
+        self._station_close_timer = self.set_timer(
+            self.station_idle_s, self._on_station_idle_expired
+        )
+        self._start_station_countdown()
+
+    def _on_station_idle_expired(self) -> None:
+        if not self.station.is_open:
+            return
+        ev = self.station.force_close()
+        if ev is not None and len(ev.member_meas_ids) > 1:
+            self._handle_station_closed(ev)
+        elif ev is not None and len(ev.member_meas_ids) == 1:
+            # Single-shot station — silently close, no review prompt
+            self._stop_station_countdown()
+
+    def _start_station_countdown(self) -> None:
+        if self._station_countdown_timer is not None:
+            self._station_countdown_timer.stop()
+        self._station_countdown_timer = self.set_interval(
+            1.0, self._tick_station_countdown
+        )
+        self._tick_station_countdown()
+
+    def _tick_station_countdown(self) -> None:
+        if not self.station.is_open or self._station_open_at_ts_ms is None:
+            self._stop_station_countdown()
+            return
+        elapsed_s = (int(datetime.now().timestamp() * 1000) - self._station_open_at_ts_ms) / 1000.0
+        remaining = max(0, int(self.station_idle_s - elapsed_s))
+        n = self.station.open_count
+        self.station_status = (
+            f"Station: {n} member{'s' if n != 1 else ''} · closes in {remaining}s"
+        )
+
+    def _stop_station_countdown(self) -> None:
+        if self._station_countdown_timer is not None:
+            self._station_countdown_timer.stop()
+            self._station_countdown_timer = None
 
     async def _request_settings_after_delay(self, client, delay_s: float) -> None:
         await asyncio.sleep(delay_s)

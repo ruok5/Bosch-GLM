@@ -184,6 +184,30 @@ async def _run_headless(copy_format: str | None, offset_in: float,
 
     station = StationTracker(idle_window_ms=int(station_idle_s * 1000))
     err_tracker = ErrorErrorTracker(window_ms=3000) if gestures else None
+    state["close_task"] = None
+
+    def _on_station_closed(ev) -> None:
+        notice(f"  → station {ev.station_id} closed ({len(ev.member_meas_ids)} members) "
+               f"— review with: python station.py show {ev.station_id}")
+        if state["client"] is not None:
+            asyncio.create_task(feedback.beep(state["client"]))
+
+    def _schedule_idle_close() -> None:
+        old = state.get("close_task")
+        if old and not old.done():
+            old.cancel()
+
+        async def _check() -> None:
+            try:
+                await asyncio.sleep(station_idle_s + 0.1)
+                if station.is_open:
+                    ev = station.force_close()
+                    if ev is not None and len(ev.member_meas_ids) > 1:
+                        _on_station_closed(ev)
+            except asyncio.CancelledError:
+                pass
+
+        state["close_task"] = asyncio.create_task(_check())
 
     # Background location lookup on connect
     async def _refresh_location() -> None:
@@ -254,11 +278,10 @@ async def _run_headless(copy_format: str | None, offset_in: float,
         events = station.feed(m.meas_id, now_ms)
         for ev in events:
             if isinstance(ev, StationClosed) and len(ev.member_meas_ids) > 1:
-                print(f"\033[1;94m  → station {ev.station_id} closed ({len(ev.member_meas_ids)} members) "
-                      f"— review with: python station.py show {ev.station_id}\033[0m",
-                      flush=True)
-                if state["client"] is not None:
-                    asyncio.create_task(feedback.beep(state["client"]))
+                _on_station_closed(ev)
+        # Arm/reset the idle-close timer so the station closes even if no
+        # further measurements arrive.
+        _schedule_idle_close()
         # Tag this insert with the open station id (or None if just one shot)
         sid = station._open_id  # accessing internal: the just-added member belongs here
         if store is not None and state["address"]:
