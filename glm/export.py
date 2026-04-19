@@ -123,8 +123,14 @@ def _group_by_station(rows: Iterable[dict]) -> dict[int, list[dict]]:
 
 def to_mleader(rows: Iterable[dict], out) -> None:
     """One text block per station for AutoCAD MLEADER paste. Members listed
-    bottom (lowest Z) → top. Stations separated by blank lines so the user
-    can paste them one at a time."""
+    HIGHEST Z first (matches how vertical sections are drawn in CAD).
+    Stations separated by blank lines so the user can paste them one at a
+    time.
+
+    Default usage limits to a single station per invocation (the most
+    recent confirmed one, or the one passed via --station) — pasting
+    multi-station output into a single MLEADER is rarely what you want.
+    Use --all-stations to override."""
     groups = _group_by_station(rows)
     if not groups:
         out.write("(no stations to export — only confirmed stations are included by default; use --include-drafts)\n")
@@ -132,16 +138,18 @@ def to_mleader(rows: Iterable[dict], out) -> None:
     sids = sorted(groups, reverse=True)  # newest first
     for i, sid in enumerate(sids):
         members = groups[sid]
+        # Sort each station's members HIGHEST Z first (descending result_m)
+        # so the visual order matches a CAD section view top-to-bottom.
+        members = sorted(members, key=lambda r: r["result_m"], reverse=True)
         # Use the first member's captured_at as the station header timestamp
         first_ts = members[0]["captured_at_iso"][:19].replace("T", " ")
         out.write(f"Station {first_ts}\n")
-        # Find max label width for alignment
         labels = [m.get("station_label") or "(unlabeled)" for m in members]
         max_w = max(len(lbl) for lbl in labels) + 1
         for m, lbl in zip(members, labels):
             out.write(f"  {lbl:<{max_w}} {m['result_imperial']}\n")
         if i < len(sids) - 1:
-            out.write("\n\f\n")  # form-feed separator between stations
+            out.write("\n\f\n")
 
 
 # Standard AutoCAD attribute-tag mapping for the preset labels. User can
@@ -237,6 +245,9 @@ def export_main() -> None:
                         help="include soft-deleted measurements")
     parser.add_argument("--include-drafts", action="store_true",
                         help="include rows from draft (unconfirmed) stations")
+    parser.add_argument("--all-stations", action="store_true",
+                        help="for mleader format: emit ALL stations (default "
+                             "is just the most recent matching one)")
     parser.add_argument("-o", "--output", metavar="PATH",
                         help="write to PATH instead of stdout")
     args = parser.parse_args()
@@ -254,6 +265,13 @@ def export_main() -> None:
         )
         dicts = [_row_to_dict(r) for r in rows]
         dicts.reverse()  # oldest-first reads better in exports
+        # MLEADER default: limit to the single most recent station unless
+        # the user explicitly asked for all or pinned a specific one.
+        if args.format == "mleader" and not args.all_stations and args.station is None:
+            station_ids = [d["station_id"] for d in dicts if d.get("station_id")]
+            if station_ids:
+                latest = max(station_ids)
+                dicts = [d for d in dicts if d.get("station_id") == latest]
         out_stream = (open(args.output, "w") if args.output else sys.stdout)
         try:
             FORMATS[args.format](dicts, out_stream)

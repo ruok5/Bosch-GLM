@@ -40,17 +40,19 @@ def stationed_store():
         s.close()
 
 
-def test_mleader_orders_members_bottom_to_top(stationed_store):
+def test_mleader_orders_members_top_to_bottom(stationed_store):
+    """MLEADER output lists highest Z first to match how vertical sections
+    are drawn in CAD."""
     s, sid = stationed_store
     rows = [_row_to_dict(r) for r in s.query()]
     out = io.StringIO()
     to_mleader(rows, out)
     text = out.getvalue()
-    # Beam should appear before deck since beam is bottom
-    beam_pos = text.find("bottom-of-beam")
+    # Deck should appear before beam since deck is top
     deck_pos = text.find("bottom-of-deck")
-    assert beam_pos != -1 and deck_pos != -1
-    assert beam_pos < deck_pos
+    beam_pos = text.find("bottom-of-beam")
+    assert deck_pos != -1 and beam_pos != -1
+    assert deck_pos < beam_pos
 
 
 def test_mleader_includes_station_header(stationed_store):
