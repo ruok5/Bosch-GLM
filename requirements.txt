@@ -1,1 +1,8 @@
 bleak>=0.22
+platformdirs>=4
+textual>=0.85
+
+# Optional: macOS geolocation. Skip on non-macOS — `glm/location.py` degrades
+# gracefully if absent.
+pyobjc-framework-CoreLocation>=10; sys_platform == "darwin"
+
