@@ -139,7 +139,7 @@ class GlmApp(App):
     show_deleted: reactive[bool] = reactive(True)
 
     def __init__(self, store: Store, offset_in: float = 0.0,
-                 catchup: bool = False, use_location: bool = True,
+                 catchup: bool = True, use_location: bool = True,
                  sites_path=None, setup_idle_s: float = 20.0,
                  gestures: bool = True) -> None:
         super().__init__()
@@ -739,7 +739,7 @@ class GlmApp(App):
             self._reload_history()
 
 
-def run_tui(offset_in: float = 0.0, catchup: bool = False,
+def run_tui(offset_in: float = 0.0, catchup: bool = True,
             use_location: bool = True, sites_path=None,
             setup_idle_s: float = 20.0, gestures: bool = True) -> None:
     store = Store()

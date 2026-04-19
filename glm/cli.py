@@ -168,8 +168,8 @@ async def _resolve_location(use_location: bool,
 
 
 async def _run_headless(copy_format: str | None, offset_in: float,
-                        store: Store | None, catchup: bool,
-                        use_location: bool, sites_path: Path | None,
+                        store: Store | None, catchup: bool = True,
+                        use_location: bool = True, sites_path: Path | None = None,
                         setup_idle_s: float = 20.0,
                         gestures: bool = True) -> None:
     notice("Looking for your GLM...")
@@ -1036,8 +1036,10 @@ def tui() -> None:
     _add_version(parser)
     parser.add_argument("--offset", type=float, default=0.0, metavar="INCHES",
                         help="static offset in decimal inches added to every measurement")
-    parser.add_argument("--catchup", action="store_true",
-                        help="on connect, recover measurements taken while disconnected")
+    parser.add_argument("--no-catchup", dest="catchup", action="store_false",
+                        default=True,
+                        help="don't probe device history on connect to recover "
+                             "measurements taken while disconnected (default: on)")
     parser.add_argument("--no-location", action="store_true",
                         help="don't query macOS Location Services for geotagging")
     parser.add_argument("--sites", metavar="PATH",
@@ -1068,9 +1070,11 @@ def headless() -> None:
                         help="static offset in decimal inches added to every measurement")
     parser.add_argument("--no-store", action="store_true",
                         help="don't persist measurements to the local SQLite store")
-    parser.add_argument("--catchup", action="store_true",
-                        help="on connect, recover measurements taken while disconnected "
-                             "by sequentially probing the device's stored history")
+    parser.add_argument("--no-catchup", dest="catchup", action="store_false",
+                        default=True,
+                        help="don't probe the device's stored history on connect "
+                             "to recover measurements taken while disconnected "
+                             "(default: on)")
     parser.add_argument("--no-location", action="store_true",
                         help="don't query macOS Location Services for geotagging")
     parser.add_argument("--sites", metavar="PATH",
