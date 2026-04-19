@@ -9,11 +9,66 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Static
 
-from ..format import format_imperial
+from ..format import IN_PER_M, format_imperial
 from ..station import (
     PIPE_SIZES, PIPE_SIZE_DEFAULT, PRESET_LABELS,
     format_pipe_label, suggest_labels,
 )
+
+
+def render_visual_stack(members: list, labels: dict[int, str | None],
+                        cursor_idx: int = -1,
+                        box_width: int = 24,
+                        min_gap_rows: int = 1,
+                        target_max_gap_rows: int = 8) -> str:
+    """Render a vertical stack diagram of station members.
+
+    Members are expected in DESCENDING Z (highest first). Vertical spacing
+    between boxes is proportional to the gap between adjacent measurements.
+    Each box shows the label (or [unlabeled]); a horizontal connector trails
+    off to the imperial value. The cursor row's box is highlighted.
+
+    Returns Rich-markup text suitable for a Static widget."""
+    if not members:
+        return "[dim](no members)[/dim]"
+
+    # Compute deltas (in inches) between adjacent members
+    deltas_in = []
+    for i in range(len(members) - 1):
+        d_m = members[i]["result_m"] - members[i + 1]["result_m"]
+        deltas_in.append(max(0.0, d_m * IN_PER_M))
+    max_delta = max(deltas_in, default=1.0) or 1.0
+    scale = max_delta / target_max_gap_rows
+
+    out: list[str] = []
+    indent = " " * box_width
+    for i, m in enumerate(members):
+        label = labels.get(m["meas_id"]) or "[dim italic](unlabeled)[/dim italic]"
+        imp = format_imperial(m["result_m"])
+        # Color the box border by cursor focus
+        is_cursor = (i == cursor_idx)
+        border_color = "bold cyan" if is_cursor else "white"
+        connector_color = "bold cyan" if is_cursor else "dim"
+        box_top = f"[{border_color}]┌{'─' * (box_width - 2)}┐[/{border_color}]"
+        box_mid = (f"[{border_color}]│[/{border_color}] "
+                   f"{label:^{box_width - 4}} "
+                   f"[{border_color}]│[/{border_color}]"
+                   f"[{connector_color}]──────[/{connector_color}] "
+                   f"[bold]{imp}[/bold]")
+        box_bot = f"[{border_color}]└{'─' * (box_width - 2)}┘[/{border_color}]"
+        out.append(box_top)
+        out.append(box_mid)
+        out.append(box_bot)
+        if i < len(members) - 1:
+            delta = deltas_in[i]
+            rows = max(min_gap_rows, int(round(delta / scale))) if scale else min_gap_rows
+            mid_x = (box_width // 2) - 1
+            spacer = " " * mid_x + "[dim]│[/dim]"
+            for _ in range(rows):
+                out.append(spacer)
+            # Annotate the gap with the delta
+            out.append(" " * (box_width // 2 + 2) + f"[dim italic]{delta:.1f}\" gap[/dim italic]")
+    return "\n".join(out)
 
 
 class PipeSizePicker(ModalScreen[str | None]):
@@ -98,6 +153,7 @@ class StationReviewScreen(ModalScreen[bool]):
         Binding("k,up", "prev", "Prev row"),
         Binding("x", "clear", "Clear label"),
         Binding("t", "custom", "Custom"),
+        Binding("v", "toggle_visual", "Visual view"),
         # 1-6 fire via on_key
     ]
 
@@ -111,6 +167,9 @@ class StationReviewScreen(ModalScreen[bool]):
         padding: 1 2;
     }
     DataTable { height: auto; max-height: 20; }
+    #review-visual { height: auto; max-height: 30; padding: 1 0; }
+    #review-visual.hidden { display: none; }
+    DataTable.hidden { display: none; }
     #custom-input { dock: bottom; height: 3; }
     """
 
@@ -140,20 +199,24 @@ class StationReviewScreen(ModalScreen[bool]):
                 self.labels[m["meas_id"]] = None
         self.cursor_row = 0
         self._custom_active = False
+        self._visual_mode = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="review-box"):
             yield Static(f"[bold]Station {self.station_id}[/bold]  —  "
-                         f"{len(self.members)} member(s)  (sorted high → low)")
+                         f"{len(self.members)} member(s)  (sorted high → low)",
+                         id="review-title")
             preset_help = "  ".join(f"[bold cyan]{i+1}[/bold cyan]={lbl.split('-')[-1]}"
                                      for i, lbl in enumerate(PRESET_LABELS))
             yield Static(
                 f"Pick a label for the highlighted row:  {preset_help}\n"
-                f"[bold cyan]t[/bold cyan]=custom text · "
-                f"[bold cyan]x[/bold cyan]=clear · "
-                f"[bold cyan]j/k[/bold cyan]=move cursor"
+                f"[bold cyan]t[/bold cyan]=custom · "
+                f"[bold cyan]x[/bold cyan]=clear+collapse · "
+                f"[bold cyan]j/k[/bold cyan]=move · "
+                f"[bold cyan]v[/bold cyan]=toggle visual"
             )
             yield DataTable(id="review-table", cursor_type="row")
+            yield Static("", id="review-visual", classes="hidden")
             yield Static(
                 "[bold green]Enter[/bold green]=confirm & save · "
                 "[bold yellow]s[/bold yellow]=save as draft · "
@@ -174,6 +237,25 @@ class StationReviewScreen(ModalScreen[bool]):
             label = self.labels.get(m["meas_id"]) or "[dim]—[/dim]"
             table.add_row(str(i + 1), f"{m['result_m']:.4f} m",
                           format_imperial(m["result_m"]), label)
+        # If visual mode is on, refresh that too
+        if self._visual_mode:
+            self._render_visual()
+
+    def _render_visual(self) -> None:
+        view = self.query_one("#review-visual", Static)
+        view.update(render_visual_stack(self.members, self.labels, self.cursor_row))
+
+    def action_toggle_visual(self) -> None:
+        self._visual_mode = not self._visual_mode
+        table = self.query_one("#review-table", DataTable)
+        view = self.query_one("#review-visual", Static)
+        if self._visual_mode:
+            self._render_visual()
+            table.add_class("hidden")
+            view.remove_class("hidden")
+        else:
+            table.remove_class("hidden")
+            view.add_class("hidden")
 
     def _current_meas_id(self) -> int | None:
         if 0 <= self.cursor_row < len(self.members):
@@ -184,11 +266,15 @@ class StationReviewScreen(ModalScreen[bool]):
         if self.cursor_row < len(self.members) - 1:
             self.cursor_row += 1
             self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
+            if self._visual_mode:
+                self._render_visual()
 
     def action_prev(self) -> None:
         if self.cursor_row > 0:
             self.cursor_row -= 1
             self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
+            if self._visual_mode:
+                self._render_visual()
 
     def action_clear(self) -> None:
         """Clear the current row's label AND collapse labels below upward.
@@ -253,6 +339,8 @@ class StationReviewScreen(ModalScreen[bool]):
         if self.cursor_row < len(self.members) - 1:
             self.cursor_row += 1
             self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
+            if self._visual_mode:
+                self._render_visual()
 
     def action_confirm(self) -> None:
         self.on_apply(self.labels, True)
