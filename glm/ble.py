@@ -29,10 +29,14 @@ async def find_glm():
 
 async def stream_frames(
     on_connect: Callable[[BleakClient], None] | None = None,
+    on_disconnect: Callable[[], None] | None = None,
 ) -> AsyncIterator[Frame]:
     """Discover, connect, enable autosync, yield decoded Frames forever.
 
     Reconnects automatically with backoff on failure or device disconnect.
+    `on_disconnect` fires once per session that previously connected — both
+    on clean idle-timeout disconnects and on exception fall-through —
+    so callers can flip their UI state back to "looking for device".
     """
     backoff = 1.0
     queue: asyncio.Queue[Frame] = asyncio.Queue()
@@ -44,6 +48,7 @@ async def stream_frames(
             queue.put_nowait(frame)
 
     while True:
+        was_connected = False
         try:
             logger.info("scanning for GLM...")
             device = await find_glm()
@@ -55,6 +60,7 @@ async def stream_frames(
             backoff = 1.0
             logger.info("connecting to %s (%s)...", device.name, device.address)
             async with BleakClient(device) as client:
+                was_connected = True
                 if on_connect:
                     on_connect(client)
                 await asyncio.sleep(0.5)
@@ -76,3 +82,6 @@ async def stream_frames(
             logger.warning("session error: %s — reconnecting in %.1fs", e, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 1.5, 10.0)
+        finally:
+            if was_connected and on_disconnect is not None:
+                on_disconnect()

@@ -373,7 +373,13 @@ class GlmApp(App):
                 catchup_queue = asyncio.Queue()
                 catchup_task = asyncio.create_task(self._catchup(client, catchup_queue))
 
-        async for frame in stream_frames(on_connect=on_connect):
+        def on_disconnect() -> None:
+            self.connected = False
+            self.client = None
+            self.device_name = "..."
+
+        async for frame in stream_frames(on_connect=on_connect,
+                                          on_disconnect=on_disconnect):
             # Responses are dispatched by payload size — settings is 11 bytes,
             # EDC measurement is 16. The wire protocol drops the cmd byte for
             # responses, so size is the only discriminator we have.

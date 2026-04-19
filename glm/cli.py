@@ -243,7 +243,13 @@ async def _run_headless(copy_format: str | None, offset_in: float,
                 _catchup(client, store, client.address, state["catchup_queue"],
                          offset_in, state))
 
-    async for frame in stream_frames(on_connect=on_connect):
+    def on_disconnect() -> None:
+        state["connected"] = False
+        state["client"] = None
+        notice("Disconnected — looking for your GLM again...")
+
+    async for frame in stream_frames(on_connect=on_connect,
+                                       on_disconnect=on_disconnect):
         if not state["connected"]:
             notice("Connected. Press the measure button (Ctrl-C to quit).")
             state["connected"] = True
