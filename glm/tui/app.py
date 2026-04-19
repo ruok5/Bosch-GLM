@@ -6,6 +6,8 @@ import logging
 from datetime import datetime
 from typing import ClassVar
 
+from rich.align import Align
+from rich.console import Group
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -15,8 +17,8 @@ from textual.widgets import (
     DataTable, Footer, Header, Input, Static,
 )
 
+from .. import __version__, feedback
 from ..ble import CHAR_UUID, stream_frames
-from .. import feedback
 from ..format import (
     IN_PER_M, copy_to_clipboard, displayed_inches, format_imperial,
     format_imperial_quarter, fractional_inches, render_big,
@@ -32,7 +34,7 @@ from ..protocol.messages import (
 from ..sites import load_sites, nearest_site
 from ..station import StationClosed, StationTracker
 from ..store import LocationFix, Store
-from .screens import StationReviewScreen
+from .screens import HelpScreen, StationReviewScreen
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,7 @@ class GlmApp(App):
         Binding("l", "review_station", "Review station"),
         Binding("D", "toggle_deleted", "Show/hide deleted"),
         Binding("U", "undelete_last", "Undelete"),
+        Binding("question_mark", "help", "Help"),
     ]
 
     connected: reactive[bool] = reactive(False)
@@ -171,10 +174,10 @@ class GlmApp(App):
 
     def on_mount(self) -> None:
         self.title = "Bosch GLM"
-        self.sub_title = f"offset {self.offset_in:+g}\""
+        self.sub_title = f"v{__version__}  ·  offset {self.offset_in:+g}\""
         table = self.query_one("#history", DataTable)
         # First column is a status glyph: ◯ no station, ◐ draft station, ● confirmed
-        table.add_columns(" ", "Time", "Result", "Imperial", "Sta", "Label")
+        table.add_columns(" ", "Time", "Result", "Imperial", "Station", "Label")
         self._reload_history()
         self.run_worker(self._ble_loop(), exclusive=True, name="ble")
 
@@ -206,7 +209,7 @@ class GlmApp(App):
             banner.add_class("hidden")
 
     def watch_offset_in(self, value: float) -> None:
-        self.sub_title = f"offset {value:+g}\""
+        self.sub_title = f"v{__version__}  ·  offset {value:+g}\""
         # Re-render the panel with the new offset applied.
         if self.last_measurement is not None:
             self._render_measurement(self.last_measurement)
@@ -272,16 +275,19 @@ class GlmApp(App):
             small = (f"[{ts}]  {m.result:.4f} m  ·  "
                      f"{format_imperial_quarter(adj_m)}  ·  measID {m.meas_id}")
         panel = self.query_one("#reading", ReadingPanel)
-        panel.update(f"[bold {color}]{big}[/bold {color}]\n[dim]{small}[/dim]")
+        # Each line centered independently so the big text doesn't visually
+        # left-anchor against the (much wider) detail line beneath it.
+        big_text = Text(big, style=f"bold {color}", no_wrap=True, overflow="ignore")
+        small_text = Text(small, style="dim", no_wrap=True, overflow="ignore")
+        panel.update(Group(Align.center(big_text), Align.center(small_text)))
 
     def _show_error(self, code: int) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         big = render_big("ERR")
         panel = self.query_one("#reading", ReadingPanel)
-        panel.update(
-            f"[bold red]{big}[/bold red]\n"
-            f"[red][{ts}]  measurement error (code {code})[/red]"
-        )
+        big_text = Text(big, style="bold red", no_wrap=True, overflow="ignore")
+        msg = Text(f"[{ts}]  measurement error (code {code})", style="red")
+        panel.update(Group(Align.center(big_text), Align.center(msg)))
         # Auto-restore the last good measurement after a few seconds.
         if self._error_clear_timer is not None:
             self._error_clear_timer.stop()
@@ -691,6 +697,9 @@ class GlmApp(App):
         self.show_deleted = not self.show_deleted
         self._reload_history()
         self.notify(f"Show deleted: {'on' if self.show_deleted else 'off'}")
+
+    def action_help(self) -> None:
+        self.push_screen(HelpScreen())
 
     def action_undelete_last(self) -> None:
         if self.last_deleted_meas_id is None or self.device_address is None:

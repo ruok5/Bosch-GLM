@@ -429,3 +429,52 @@ class StationReviewScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class HelpScreen(ModalScreen[None]):
+    """One-screen legend for the icons, colors, and key bindings."""
+
+    BINDINGS = [
+        Binding("escape,q,question_mark,enter,space", "dismiss", "Close"),
+    ]
+
+    DEFAULT_CSS = """
+    HelpScreen { align: center middle; }
+    #help-box {
+        width: 78;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    """
+
+    HELP_TEXT = (
+        "[bold]History glyphs (leftmost column)[/bold]\n"
+        "  [dim]◯[/dim]   no station — a one-off shot, not part of a stack\n"
+        "  [bold yellow]◐[/bold yellow]   [yellow]draft station[/yellow] — grouped but not yet reviewed\n"
+        "  [bold green]●[/bold green]   [green]confirmed station[/green] — reviewed and labeled\n"
+        "\n"
+        "[bold]Label color[/bold]\n"
+        "  [yellow]yellow[/yellow] = draft (you can still change it via [bold]l[/bold])\n"
+        "  [green]green[/green]  = confirmed (locked in for export)\n"
+        "  [strike dim]strikethrough[/strike dim] = soft-deleted (hidden by default)\n"
+        "\n"
+        "[bold]Keys[/bold]\n"
+        "  [bold]q[/bold] quit       [bold]c[/bold] copy last      [bold]o[/bold] set offset\n"
+        "  [bold]r[/bold] refresh    [bold]s[/bold] sync settings  [bold]l[/bold] review station\n"
+        "  [bold]D[/bold] show/hide deleted  [bold]U[/bold] undelete last\n"
+        "  [bold]?[/bold] this help\n"
+        "\n"
+        "[bold]Station gestures[/bold]\n"
+        "  Two error readings within 3s soft-deletes the last good shot.\n"
+        "  Stations close after 60s of inactivity, then await your review."
+    )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-box"):
+            yield Static(self.HELP_TEXT)
+            yield Static("[dim]Press Esc, q, ?, Enter, or Space to close.[/dim]")
+
+    def action_dismiss(self) -> None:
+        self.dismiss(None)
