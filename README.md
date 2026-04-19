@@ -57,6 +57,25 @@ Tested on a Bosch GLM165-27C6 on macOS. Should work on any GLM in the
   JSON, or Markdown — by date range, site, device, or row count.
 - **Notes** (`notes.py`): attach free-form text to specific
   measurements after the fact.
+- **Stations** (`station.py`, TUI): consecutive vertical-elevation
+  shots at one X-Y datum auto-group into a "station" (default 60s
+  idle window). The TUI's `l` key opens a review modal where you
+  assign labels from a preset palette
+  (`bottom-of-beam` → `…-purlin` → `…-subpurlin` → `…-foil` →
+  `…-deck`, plus `bottom-of-pipe(<size>)` from a pipe-size picker)
+  in Z-order. Stations stay `draft` until you confirm.
+- **Error-error gesture**: two GLM measurement errors within 3s
+  soft-delete the most recent good measurement. Hands-free fix-the-
+  misfire workflow; deleted rows hide by default, toggle with `D`,
+  undelete with `U`. The double-beep audio confirms the action.
+- **Audio + visual feedback** (`glm/feedback.py`): undocumented
+  `0x45/0x46` beeper and `0x47/0x48` display commands give us 30ms
+  beep, double-beep, triple-beep, and display-blink primitives —
+  no laser, no measurement, no entry in the device's history list.
+- **AutoCAD-targeted exports** (`export.py --format mleader|attribs`):
+  per-station MLEADER text blocks for paste into AutoCAD multi-leaders,
+  or per-station CSV with `BOT_BEAM`/`BOT_PURLIN`/etc. attribute-tag
+  columns for block-attribute import.
 
 ## Platform support
 
@@ -200,6 +219,47 @@ python notes.py list                            # all measurements with notes
 echo "long note from a file or pipe" | python notes.py set --meas-id 786 -
 ```
 
+### Stations
+
+Take 3–6 vertical elevation shots at one location within ~60s of each
+other; the tracker groups them as a station automatically. In the TUI:
+
+| Key | Action |
+| --- | ------ |
+| `l` | Open the station-review modal for the most recent station |
+| `1`–`6` | (in modal) pick label from preset; `6` opens pipe-size picker |
+| `t` | (in modal) custom label |
+| `x` | (in modal) clear label |
+| `Enter` | (in modal) confirm + save |
+| `s` | (in modal) save as draft |
+| `D` | Toggle "show deleted" in history |
+| `U` | Undelete the most recent soft-deleted measurement |
+
+Headless: stations are tracked silently; review past stations with
+`python station.py list / show <id> / confirm <id>`.
+
+### AutoCAD export
+
+```sh
+# Per-station MLEADER text blocks (paste into a multi-leader)
+python export.py --format mleader -o /tmp/mleader.txt
+
+# Per-station CSV with BOT_BEAM/BOT_PURLIN/etc columns matching
+# AutoCAD block attribute tags
+python export.py --format attribs -o /tmp/attribs.csv
+
+# By default both exclude soft-deleted rows AND draft (unconfirmed) stations.
+# Widen with --include-deleted / --include-drafts.
+python export.py --format attribs --include-drafts
+```
+
+### Error-error gesture
+
+While streaming, if you take a measurement you don't want, fire two
+errors at empty space within 3 seconds — the last good measurement is
+soft-deleted (you'll hear a double beep). Toggle `D` in the TUI to
+view deleted rows; press `U` to undelete the most recent.
+
 ### Inspecting the SQLite log
 
 ```sh
@@ -216,20 +276,25 @@ glm/
   protocol/        # pure-Python wire layer (CRC, frame, messages)
   ble.py           # bleak transport
   cli.py           # argparse entry points (headless, tui, settings)
-  export.py        # CSV/JSON/MD export logic
+  export.py        # CSV/JSON/MD/MLEADER/attribs export logic
+  feedback.py      # beep/display primitives via undocumented 0x45-0x48 cmds
   format.py        # display + clipboard helpers
+  gestures.py      # ErrorErrorTracker for hands-free soft-delete
   location.py      # CoreLocation lookup + haversine
   notes.py         # set/get/list note CLI logic
   sites.py         # site JSON registry + nearest-match lookup
+  station.py       # StationTracker + preset label catalog + station CLI
   store.py         # SQLite persistence (with idempotent migrations)
   tui/app.py       # Textual app
+  tui/screens.py   # StationReviewScreen + PipeSizePicker modals
 main.py            # shim → glm.cli:headless
 tui.py             # shim → glm.cli:tui
 settings.py        # shim → glm.cli:settings_main
 export.py          # shim → glm.export:export_main
 notes.py           # shim → glm.notes:notes_main
+station.py         # shim → glm.station:station_main
 docs/              # design notes
-tests/             # pytest suite (49 tests)
+tests/             # pytest suite (83 tests)
 ```
 
 The `reverse/` directory (gitignored) is where decompiled Bosch app
