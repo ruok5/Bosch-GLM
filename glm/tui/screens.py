@@ -115,16 +115,21 @@ class StationReviewScreen(ModalScreen[bool]):
 
     def __init__(self, station_id: int, members: list,
                  on_apply: Callable[[dict[int, str | None], bool], None]) -> None:
-        """`members` is a list of sqlite3.Row, sorted by result_m ascending.
+        """`members` is a list of sqlite3.Row from store.station_members(); the
+        store returns ascending Z. We display DESCENDING (highest Z at top)
+        because that matches how vertical sections are drawn in CAD.
         `on_apply(labels_by_meas_id, confirmed)` is called when the user saves."""
         super().__init__()
         self.station_id = station_id
-        self.members = members
+        # Reverse so highest Z is row 0
+        self.members = list(reversed(list(members)))
         self.on_apply = on_apply
         self.labels: dict[int, str | None] = {}
-        # Pre-fill with existing labels or suggestions
-        suggestions = suggest_labels(len(members))
-        for i, m in enumerate(members):
+        # Pre-fill with existing labels or suggestions. Suggestions are in
+        # ascending Z order (beam → … → deck); since our display is now
+        # descending, reverse them so deck lands on the top row.
+        suggestions = list(reversed(suggest_labels(len(self.members))))
+        for i, m in enumerate(self.members):
             existing = m["station_label"]
             if existing:
                 self.labels[m["meas_id"]] = existing
@@ -138,13 +143,21 @@ class StationReviewScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="review-box"):
             yield Static(f"[bold]Station {self.station_id}[/bold]  —  "
-                         f"{len(self.members)} member(s)")
-            preset_help = "  ".join(f"[bold]{i+1}[/bold]={lbl.split('-')[-1]}"
+                         f"{len(self.members)} member(s)  (sorted high → low)")
+            preset_help = "  ".join(f"[bold cyan]{i+1}[/bold cyan]={lbl.split('-')[-1]}"
                                      for i, lbl in enumerate(PRESET_LABELS))
-            yield Static(f"[dim]Per row: {preset_help}  [bold]t[/bold]=custom  "
-                         f"[bold]x[/bold]=clear[/dim]")
+            yield Static(
+                f"Pick a label for the highlighted row:  {preset_help}\n"
+                f"[bold cyan]t[/bold cyan]=custom text · "
+                f"[bold cyan]x[/bold cyan]=clear · "
+                f"[bold cyan]j/k[/bold cyan]=move cursor"
+            )
             yield DataTable(id="review-table", cursor_type="row")
-            yield Static("[dim]Enter=confirm & save · s=save draft · Esc=cancel[/dim]")
+            yield Static(
+                "[bold green]Enter[/bold green]=confirm & save · "
+                "[bold yellow]s[/bold yellow]=save as draft · "
+                "[bold red]Esc[/bold red]=cancel"
+            )
             yield Footer()
 
     def on_mount(self) -> None:
@@ -200,7 +213,7 @@ class StationReviewScreen(ModalScreen[bool]):
         event.input.remove()
         self._custom_active = False
 
-    async def on_key(self, event) -> None:
+    def on_key(self, event) -> None:
         if self._custom_active:
             return
         if event.key in ("1", "2", "3", "4", "5", "6"):
@@ -211,17 +224,24 @@ class StationReviewScreen(ModalScreen[bool]):
                 return
             event.stop()
             if label == "bottom-of-pipe":
-                size = await self.app.push_screen_wait(PipeSizePicker())
-                if size:
-                    self.labels[mid] = format_pipe_label(size)
-                    self._render_rows()
+                # Use callback pattern (works across Textual versions, doesn't
+                # require an awaitable push_screen result).
+                def _on_pipe(size: str | None) -> None:
+                    if size:
+                        self.labels[mid] = format_pipe_label(size)
+                        self._render_rows()
+                        self._advance()
+                self.app.push_screen(PipeSizePicker(), _on_pipe)
             else:
                 self.labels[mid] = label
                 self._render_rows()
-                # Auto-advance for fast labeling
-                if self.cursor_row < len(self.members) - 1:
-                    self.cursor_row += 1
-                    self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
+                self._advance()
+
+    def _advance(self) -> None:
+        """Auto-move cursor to next row after a label is applied."""
+        if self.cursor_row < len(self.members) - 1:
+            self.cursor_row += 1
+            self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
 
     def action_confirm(self) -> None:
         self.on_apply(self.labels, True)

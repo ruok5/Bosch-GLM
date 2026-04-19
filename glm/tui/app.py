@@ -132,7 +132,7 @@ class GlmApp(App):
     has_warnings: reactive[bool] = reactive(False)
     catchup_status: reactive[str] = reactive("")
     station_status: reactive[str] = reactive("")
-    show_deleted: reactive[bool] = reactive(False)
+    show_deleted: reactive[bool] = reactive(True)
 
     def __init__(self, store: Store, offset_in: float = 0.0,
                  catchup: bool = False, use_location: bool = True,
