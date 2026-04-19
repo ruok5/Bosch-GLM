@@ -172,7 +172,8 @@ class GlmApp(App):
         self.title = "Bosch GLM"
         self.sub_title = f"offset {self.offset_in:+g}\""
         table = self.query_one("#history", DataTable)
-        table.add_columns("Time", "Result", "Imperial", "Mode", "ID", "Label")
+        # First column is a status glyph: ◯ no station, ◐ draft station, ● confirmed
+        table.add_columns(" ", "Time", "Result", "Imperial", "Sta", "Label")
         self._reload_history()
         self.run_worker(self._ble_loop(), exclusive=True, name="ble")
 
@@ -292,7 +293,8 @@ class GlmApp(App):
     def _reload_history(self) -> None:
         table = self.query_one("#history", DataTable)
         table.clear()
-        sql = ("SELECT meas_id, dev_mode, result_m, captured_at, deleted_at, station_label "
+        sql = ("SELECT meas_id, dev_mode, result_m, captured_at, deleted_at, "
+               "       station_id, station_label, station_status "
                "FROM measurements")
         params: list = []
         if not self.show_deleted:
@@ -304,12 +306,28 @@ class GlmApp(App):
             ts = datetime.fromtimestamp(r["captured_at"] / 1000).strftime("%H:%M:%S")
             res_str = f"{r['result_m']:.4f} m"
             imp_str = format_imperial(r["result_m"])
+            # Station glyph: ● confirmed (green), ◐ draft (yellow), ◯ no station (dim)
+            sid = r["station_id"]
+            status = r["station_status"]
+            if sid is None:
+                glyph = "[dim]◯[/dim]"
+                sta_col = "[dim]—[/dim]"
+            elif status == "confirmed":
+                glyph = "[bold green]●[/bold green]"
+                sta_col = f"[green]…{sid % 1000:03d}[/green]"
+            else:
+                glyph = "[bold yellow]◐[/bold yellow]"
+                sta_col = f"[yellow]…{sid % 1000:03d}[/yellow]"
             label = r["station_label"] or ""
+            if label:
+                colorize = "green" if status == "confirmed" else "yellow"
+                label = f"[{colorize}]{label}[/{colorize}]"
             if r["deleted_at"]:
                 res_str = f"[strike dim]{res_str}[/strike dim]"
                 imp_str = f"[strike dim]{imp_str}[/strike dim]"
-            table.add_row(ts, res_str, imp_str, str(r["dev_mode"]),
-                          str(r["meas_id"]), label)
+                if label:
+                    label = f"[strike dim]{label}[/strike dim]"
+            table.add_row(glyph, ts, res_str, imp_str, sta_col, label)
 
     # Textual DataTable has no insert-at-top API. For ~50 rows the cheapest
     # correct way to keep newest-first is to clear and re-query the store on
