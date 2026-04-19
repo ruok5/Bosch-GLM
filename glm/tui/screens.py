@@ -90,14 +90,15 @@ class StationReviewScreen(ModalScreen[bool]):
     """
 
     BINDINGS = [
+        # priority=True so DataTable doesn't eat Enter for row-selection
+        Binding("enter", "confirm", "Confirm", priority=True),
         Binding("escape", "cancel", "Cancel"),
-        Binding("enter", "confirm", "Confirm"),
         Binding("s", "save_draft", "Save draft"),
         Binding("j,down", "next", "Next row"),
         Binding("k,up", "prev", "Prev row"),
         Binding("x", "clear", "Clear label"),
         Binding("t", "custom", "Custom"),
-        # 1-6 fire pick_label_<n> via on_key
+        # 1-6 fire via on_key
     ]
 
     DEFAULT_CSS = """
@@ -190,10 +191,20 @@ class StationReviewScreen(ModalScreen[bool]):
             self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
 
     def action_clear(self) -> None:
-        mid = self._current_meas_id()
-        if mid is not None:
-            self.labels[mid] = None
-            self._render_rows()
+        """Clear the current row's label AND collapse labels below upward.
+
+        If row N is cleared, every labeled row N+1, N+2, … shifts its label
+        up by one position (last labeled row becomes empty). This avoids
+        re-labeling everything when one slot is removed."""
+        idx = self.cursor_row
+        if not (0 <= idx < len(self.members)):
+            return
+        # Shift labels: row[i] gets row[i+1]'s label, for i = idx..len-2
+        for i in range(idx, len(self.members) - 1):
+            self.labels[self.members[i]["meas_id"]] = self.labels[self.members[i + 1]["meas_id"]]
+        # Last row becomes empty
+        self.labels[self.members[-1]["meas_id"]] = None
+        self._render_rows()
 
     def action_custom(self) -> None:
         if self._custom_active:
