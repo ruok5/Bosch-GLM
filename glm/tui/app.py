@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from typing import ClassVar
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -310,24 +311,26 @@ class GlmApp(App):
             sid = r["station_id"]
             status = r["station_status"]
             if sid is None:
-                glyph = "[dim]◯[/dim]"
-                sta_col = "[dim]—[/dim]"
+                glyph = Text("◯", style="dim")
+                sta_col = Text("—", style="dim")
             elif status == "confirmed":
-                glyph = "[bold green]●[/bold green]"
-                sta_col = f"[green]…{sid % 1000:03d}[/green]"
+                glyph = Text("●", style="bold green")
+                sta_col = Text(f"…{sid % 1000:03d}", style="green")
             else:
-                glyph = "[bold yellow]◐[/bold yellow]"
-                sta_col = f"[yellow]…{sid % 1000:03d}[/yellow]"
-            label = r["station_label"] or ""
-            if label:
-                colorize = "green" if status == "confirmed" else "yellow"
-                label = f"[{colorize}]{label}[/{colorize}]"
+                glyph = Text("◐", style="bold yellow")
+                sta_col = Text(f"…{sid % 1000:03d}", style="yellow")
+            label_text = r["station_label"] or ""
+            label_style = "green" if status == "confirmed" else "yellow"
+            label_cell = Text(label_text, style=label_style if label_text else "")
+            res_cell = Text(res_str)
+            imp_cell = Text(imp_str)
             if r["deleted_at"]:
-                res_str = f"[strike dim]{res_str}[/strike dim]"
-                imp_str = f"[strike dim]{imp_str}[/strike dim]"
-                if label:
-                    label = f"[strike dim]{label}[/strike dim]"
-            table.add_row(glyph, ts, res_str, imp_str, sta_col, label)
+                # Strikethrough on result/imperial/label without inflating width
+                res_cell.stylize("strike dim")
+                imp_cell.stylize("strike dim")
+                if label_text:
+                    label_cell.stylize("strike dim")
+            table.add_row(glyph, ts, res_cell, imp_cell, sta_col, label_cell)
 
     # Textual DataTable has no insert-at-top API. For ~50 rows the cheapest
     # correct way to keep newest-first is to clear and re-query the store on
