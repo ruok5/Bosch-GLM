@@ -8,9 +8,11 @@ from datetime import datetime
 from pathlib import Path
 
 from .ble import CHAR_UUID, stream_frames
+from . import feedback
 from .format import (
     IN_PER_M, copy_to_clipboard, displayed_inches, format_imperial, render_big,
 )
+from .gestures import ErrorErrorTracker, SoftDeleteTrigger
 from .protocol.constants import FrameType
 from .protocol.frame import encode
 from .protocol.messages import (
@@ -20,6 +22,7 @@ from .protocol.messages import (
     edc_request_history_item, get_settings_request, set_settings_request,
 )
 from .sites import Site, load_sites, nearest_site
+from .station import StationClosed, StationOpened, StationTracker
 from .store import LocationFix, Store
 
 
@@ -166,15 +169,21 @@ async def _resolve_location(use_location: bool,
 
 async def _run_headless(copy_format: str | None, offset_in: float,
                         store: Store | None, catchup: bool,
-                        use_location: bool, sites_path: Path | None) -> None:
+                        use_location: bool, sites_path: Path | None,
+                        station_idle_s: float = 60.0,
+                        gestures: bool = True) -> None:
     notice("Looking for your GLM...")
     state: dict = {"address": None, "connected": False,
                    "catchup_queue": None, "catchup_task": None,
-                   "location": None, "site_name": None}
+                   "location": None, "site_name": None,
+                   "client": None}
 
     sites = load_sites(sites_path) if use_location else []
     if sites:
         notice(f"Loaded {len(sites)} site(s) from {sites_path or 'default sites file'}.")
+
+    station = StationTracker(idle_window_ms=int(station_idle_s * 1000))
+    err_tracker = ErrorErrorTracker(window_ms=3000) if gestures else None
 
     # Background location lookup on connect
     async def _refresh_location() -> None:
@@ -189,6 +198,7 @@ async def _run_headless(copy_format: str | None, offset_in: float,
     def on_connect(client) -> None:
         state["address"] = client.address
         state["connected"] = False
+        state["client"] = client
         if use_location:
             asyncio.create_task(_refresh_location())
         if catchup and store is not None:
@@ -222,16 +232,41 @@ async def _run_headless(copy_format: str | None, offset_in: float,
             # Catchup task owns these — don't store or print here.
             continue
         # Live measurement path:
+        now_ms = int(datetime.now().timestamp() * 1000)
         if m.is_error:
             ts = datetime.now().strftime('%H:%M:%S')
             err = int(m.result)
             print(f"\033[1;91m[{ts}]  measurement error (code {err})\033[0m", flush=True)
+            # Error-error gesture handling
+            if err_tracker is not None:
+                trigger = err_tracker.on_error(now_ms)
+                if trigger is not None and store is not None and trigger.device_address:
+                    if store.soft_delete(trigger.device_address, trigger.meas_id):
+                        print(f"\033[1;95m  → soft-deleted measurement #{trigger.meas_id} "
+                              f"(error-error gesture)\033[0m", flush=True)
+                        if state["client"] is not None:
+                            asyncio.create_task(feedback.double_beep(state["client"]))
             continue
         if not m.is_meaningful:
             continue  # laser-on / no-action heartbeat
+
+        # Station tracking — group consecutive shots into one observation
+        events = station.feed(m.meas_id, now_ms)
+        for ev in events:
+            if isinstance(ev, StationClosed) and len(ev.member_meas_ids) > 1:
+                print(f"\033[1;94m  → station {ev.station_id} closed ({len(ev.member_meas_ids)} members) "
+                      f"— review with: python station.py show {ev.station_id}\033[0m",
+                      flush=True)
+                if state["client"] is not None:
+                    asyncio.create_task(feedback.beep(state["client"]))
+        # Tag this insert with the open station id (or None if just one shot)
+        sid = station._open_id  # accessing internal: the just-added member belongs here
         if store is not None and state["address"]:
             store.insert(state["address"], m, offset_in=offset_in,
-                         location=state["location"], site_name=state["site_name"])
+                         location=state["location"], site_name=state["site_name"],
+                         station_id=sid)
+        if err_tracker is not None and state["address"]:
+            err_tracker.on_good(m.meas_id, state["address"], now_ms)
         _print_measurement(m, copy_format, offset_in)
 
 
@@ -795,6 +830,7 @@ def settings_main() -> None:
         description="Read or write Bosch GLM device settings.",
         epilog="Run with no flags to read current settings."
     )
+    _add_version(parser)
     parser.add_argument("--units", choices=sorted(_UNIT_CHOICES))
     parser.add_argument("--beep", choices=sorted(_ONOFF_CHOICES))
     parser.add_argument("--laser", choices=sorted(_ONOFF_CHOICES))
@@ -946,9 +982,16 @@ def settings_main() -> None:
         raise SystemExit(1)
 
 
+def _add_version(parser: argparse.ArgumentParser) -> None:
+    from . import __version__
+    parser.add_argument("--version", "-V", action="version",
+                        version=f"%(prog)s {__version__}")
+
+
 def tui() -> None:
     """Launch the Textual TUI."""
     parser = argparse.ArgumentParser(description="Bosch GLM TUI.")
+    _add_version(parser)
     parser.add_argument("--offset", type=float, default=0.0, metavar="INCHES",
                         help="static offset in decimal inches added to every measurement")
     parser.add_argument("--catchup", action="store_true",
@@ -957,15 +1000,22 @@ def tui() -> None:
                         help="don't query macOS Location Services for geotagging")
     parser.add_argument("--sites", metavar="PATH",
                         help="JSON file of named sites for nearest-site matching")
+    parser.add_argument("--station-idle-s", type=float, default=60.0,
+                        help="idle window for station auto-close (default 60s)")
+    parser.add_argument("--no-gestures", action="store_true",
+                        help="disable error-error soft-delete gesture detection")
     args = parser.parse_args()
     sites_path = Path(args.sites).expanduser() if args.sites else None
     from .tui.app import run_tui
     run_tui(offset_in=args.offset, catchup=args.catchup,
-            use_location=not args.no_location, sites_path=sites_path)
+            use_location=not args.no_location, sites_path=sites_path,
+            station_idle_s=args.station_idle_s,
+            gestures=not args.no_gestures)
 
 
 def headless() -> None:
     parser = argparse.ArgumentParser(description="Stream measurements from a Bosch GLM rangefinder.")
+    _add_version(parser)
     parser.add_argument("-v", "--verbose", action="count", default=0,
                         help="verbose output: -v for info/warnings, -vv for full debug")
     parser.add_argument("-c", "--clipboard", nargs="?", const="in", default=None,
@@ -984,6 +1034,10 @@ def headless() -> None:
     parser.add_argument("--sites", metavar="PATH",
                         help="JSON file of named sites for nearest-site matching "
                              "(default: ~/Library/Application Support/bosch-glm/sites.json)")
+    parser.add_argument("--station-idle-s", type=float, default=60.0,
+                        help="idle window for station auto-close (default 60s)")
+    parser.add_argument("--no-gestures", action="store_true",
+                        help="disable error-error soft-delete gesture detection")
     parser.add_argument("--log-file", metavar="PATH",
                         help="write DEBUG-level diagnostic log to PATH (overrides -v level for the file)")
     args = parser.parse_args()
@@ -1010,6 +1064,8 @@ def headless() -> None:
         asyncio.run(_run_headless(
             args.clipboard, args.offset, store, args.catchup,
             use_location=not args.no_location, sites_path=sites_path,
+            station_idle_s=args.station_idle_s,
+            gestures=not args.no_gestures,
         ))
     except KeyboardInterrupt:
         pass

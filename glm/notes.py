@@ -10,9 +10,12 @@ from .store import Store
 
 
 def notes_main() -> None:
+    from . import __version__
     parser = argparse.ArgumentParser(
         description="Attach a note to a stored measurement.",
     )
+    parser.add_argument("--version", "-V", action="version",
+                        version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     add = sub.add_parser("set", help="set or replace the note on a measurement")
