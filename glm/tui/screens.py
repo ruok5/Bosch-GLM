@@ -16,134 +16,140 @@ from ..setup import (
 )
 
 
-# Verbatim canonical roof-section diagram from the user's hand sketch.
-# Four named label slots on the left tied to physical structural members;
-# the right side is a stylized cross-section showing those members plus a
-# pipe descending through. Each {SLOT} placeholder is exactly 20 chars wide
-# so the diagram's box borders line up.
+# Verbatim canonical roof-section diagram from the user's v2 sketch.
+# Seven value slots: 4 structural (DECK, SUBPURLIN/FOIL, PURLIN, BEAM) on
+# the left; 3 pipes (BELOW DECK / PURLIN / BEAM) in the middle column.
+# Each {Sn} placeholder is exactly 20 chars wide so the diagram aligns.
 _VISUAL_TEMPLATE = (
     "                           *────────▲────┬──┬──────────────────────────┬──┬───────*\n"
     "                                    │    │  │                          │  │\n"
     "                                    │    │  │                          │  │\n"
     "                                    │    │  │                          │  │\n"
-    "┌────────────────────┐     *────────┼────┴─▲┴────────────────────────┬─┴──┴──┬────*\n"
-    "│{DECK}├──────────────┘      │                         │       │\n"
-    "└────────────────────┘                     │                         │       │\n"
-    "                                           │                         │       │\n"
-    "                                           │                         │       │\n"
-    "┌────────────────────┐                     │                         │       │\n"
-    "│{FOIL}├─────────────────────┘                         │       │\n"
-    "└────────────────────┘                                               │       │\n"
+    "┌────────────────────┐     *────────┼────┴▲─┴────────────────────────┬─┴──┴──┬────*\n"
+    "│{S0}├──────────────┘     │                          │       │\n"
+    "DECK─────────────────┘                    │                          │       │\n"
+    "                          ┌───────────────┘                   .─.    │       │\n"
+    "                          │                                  (   )   │       │\n"
+    "┌────────────────────┐    │                                   `▲'    │       │\n"
+    "│{S1}├────┘     ┌────────────────────┐         │     │       │\n"
+    "SUBPURLIN / FOIL─────┘          │{S2}├─────────┘     │       │\n"
+    "                                PIPE BELOW DECK──────┘               │       │\n"
     "                                                                     │       │\n"
     "                           *─────────────▲───────────────────────────┤       ├────*\n"
     "┌────────────────────┐                   │                           │       │\n"
-    "│{PURLIN}├───────────────────┘                           │       │\n"
-    "└────────────────────┘                                               │       │\n"
-    "                                                                     │       │\n"
-    "                                                                     │       │\n"
-    "┌────────────────────┐                                               │       │\n"
-    "│{BEAM}├───────────────────────────────────────────────┼───┐   │\n"
-    "└────────────────────┘                                               │   │   │\n"
-    "                                                                     │   │   │\n"
-    "                                                                     │   │   │\n"
-    "                                                                     │   │   │\n"
-    "                                                                     └───▼───┘\n"
+    "│{S3}├───────────────────┘                    .─.    │       │\n"
+    "PURLIN───────────────┘                                       (   )   │       │\n"
+    "                                ┌────────────────────┐        `▲'    │       │\n"
+    "                                │{S4}├─────────┘     │       │\n"
+    "┌────────────────────┐          PIPE BELOW PURLIN────┘               │       │\n"
+    "│{S5}├───────────────────────────────────────────────┼───┐   │\n"
+    "BEAM─────────────────┘                                               │   │   │\n"
+    "                                ┌────────────────────┐               │   │   │\n"
+    "                                │{S6}├─────────┐     │   │   │\n"
+    "                                PIPE BELOW BEAM──────┘         │     │   │   │\n"
+    "                                                              .┼.    └───▼───┘\n"
+    "                                                             ( │ )\n"
+    "                                                              `▼'\n"
 )
-_SLOT_WIDTH = 20  # interior width of each label box
+_SLOT_WIDTH = 20  # interior width of each value box
 
 
-def _slot_text(short_name: str, full_label: str | None,
-               value_imperial: str | None,
-               highlighted: bool) -> str:
-    """Format the inner content of a 20-char label slot.
+# Slot order = vertical traversal order from top to bottom in the diagram.
+# Cursor j/k navigates through these in order; first measurement (highest Z)
+# fills index 0, second fills index 1, etc.
+SLOT_DECK         = 0
+SLOT_FOIL_SUB     = 1
+SLOT_PIPE_DECK    = 2
+SLOT_PURLIN       = 3
+SLOT_PIPE_PURLIN  = 4
+SLOT_BEAM         = 5
+SLOT_PIPE_BEAM    = 6
+N_SLOTS = 7
 
-    The slot's position in the diagram already conveys WHICH structural
-    element it represents, so the box itself just shows the imperial
-    value (or the short_name placeholder if unassigned). Truncation is
-    safe because we never try to fit both the name and the value.
-    """
-    if full_label is None:
-        body = short_name
-        text = body.center(_SLOT_WIDTH)
-        return f"[dim italic]{text}[/dim italic]"
-    body = (value_imperial or short_name)
-    if len(body) > _SLOT_WIDTH:
-        body = body[:_SLOT_WIDTH]
+# Per-slot metadata: (display name shown in the cleared placeholder, default
+# label written to the store when this slot is filled, kind).
+# kind in {"struct", "foil_sub", "pipe"} — drives the per-slot keybindings:
+# foil_sub slots toggle subpurlin↔foil with `f`; pipe slots open the size
+# picker with `p`.
+_SLOT_SPECS: list[tuple[str, str, str]] = [
+    ("DECK",              "bottom-of-deck",       "struct"),
+    ("SUBPURLIN/FOIL",    "bottom-of-subpurlin",  "foil_sub"),
+    ("PIPE BELOW DECK",   "",                     "pipe"),
+    ("PURLIN",            "bottom-of-purlin",     "struct"),
+    ("PIPE BELOW PURLIN", "",                     "pipe"),
+    ("BEAM",              "bottom-of-beam",       "struct"),
+    ("PIPE BELOW BEAM",   "",                     "pipe"),
+]
+
+
+def _slot_text(value_imperial: str | None, highlighted: bool) -> str:
+    """Format the 20-char inner content of a value box. Empty slots render
+    as a dim em-dash placeholder; filled slots show the centered imperial
+    string. Highlighted (cursor) slots are rendered in reverse-video cyan."""
+    if value_imperial is None:
+        body = "—"
+    else:
+        body = value_imperial[:_SLOT_WIDTH]
     text = body.center(_SLOT_WIDTH)
-    # If the assigned label is the foil/subpurlin slot but ambiguous which
-    # one was chosen, prefix with an indicator
-    if full_label == "bottom-of-subpurlin" and short_name == "FOIL/SUBPURLIN":
-        body = f"sub {value_imperial}"
-        if len(body) > _SLOT_WIDTH:
-            body = body[:_SLOT_WIDTH]
-        text = body.center(_SLOT_WIDTH)
-    elif full_label == "bottom-of-foil" and short_name == "FOIL/SUBPURLIN":
-        body = f"foil {value_imperial}"
-        if len(body) > _SLOT_WIDTH:
-            body = body[:_SLOT_WIDTH]
-        text = body.center(_SLOT_WIDTH)
     if highlighted:
         return f"[bold cyan reverse]{text}[/bold cyan reverse]"
+    if value_imperial is None:
+        return f"[dim italic]{text}[/dim italic]"
     return f"[bold green]{text}[/bold green]"
 
 
-# Mapping from the canonical preset labels to slot names used in the diagram.
-# foil and subpurlin share a slot per the user's clarification that they
-# typically sit at the same Z when both are present.
-_LABEL_TO_SLOT = {
-    "bottom-of-deck":      "DECK",
-    "bottom-of-foil":      "FOIL",
-    "bottom-of-subpurlin": "FOIL",   # foil/subpurlin slot
-    "bottom-of-purlin":    "PURLIN",
-    "bottom-of-beam":      "BEAM",
-}
+def slot_label_for(slot_idx: int, slot_options: dict[int, str]) -> str:
+    """Compute the label that should be written to the store for a measurement
+    at the given slot. `slot_options` carries per-slot overrides:
+    - foil_sub slots: option value 'foil' or 'subpurlin' (default subpurlin)
+    - pipe slots: option value is the size string (default PIPE_SIZE_DEFAULT)
+    """
+    _name, default_label, kind = _SLOT_SPECS[slot_idx]
+    if kind == "foil_sub":
+        choice = slot_options.get(slot_idx, "subpurlin")
+        return f"bottom-of-{choice}"
+    if kind == "pipe":
+        size = slot_options.get(slot_idx, PIPE_SIZE_DEFAULT)
+        return format_pipe_label(size)
+    return default_label
 
 
-def render_visual_stack(members: list, labels: dict[int, str | None],
-                        cursor_idx: int = -1) -> str:
-    """Render the verbatim roof-section diagram with measured values dropped
-    into their named label slots. Members whose labels aren't in the canonical
-    set (e.g. bottom-of-pipe(<size>) or custom labels) are listed below the
-    diagram so they're not lost.
+def render_visual_stack(members: list,
+                        slot_assignment: list[int | None],
+                        slot_options: dict[int, str],
+                        cursor_idx: int,
+                        unassigned_meas_ids: list[int] | None = None) -> str:
+    """Render the v2 roof diagram with measurement values dropped into
+    their assigned slots. `slot_assignment[i]` is the meas_id at slot i, or
+    None for an empty slot. `cursor_idx` highlights one slot.
 
-    Highlights the slot that matches the cursor row, if any."""
-    # Build a map: slot → (label_str, value, member_idx)
-    slot_data: dict[str, tuple[str, str, int]] = {}
-    extras: list[tuple[str, str, int]] = []  # (label, value, idx) for non-slot labels
-    for i, m in enumerate(members):
-        label = labels.get(m["meas_id"])
-        imp = format_imperial(m["result_m"])
-        slot = _LABEL_TO_SLOT.get(label) if label else None
-        if slot:
-            slot_data[slot] = (label, imp, i)
-        elif label:
-            extras.append((label, imp, i))
+    Members not assigned to any slot (overflow beyond 7) are listed below
+    the diagram in an "Other measurements" block."""
+    by_id = {m["meas_id"]: m for m in members}
 
-    cursor_slot: str | None = None
-    if 0 <= cursor_idx < len(members):
-        cl = labels.get(members[cursor_idx]["meas_id"])
-        cursor_slot = _LABEL_TO_SLOT.get(cl) if cl else None
+    def fill(idx: int) -> str:
+        meas_id = slot_assignment[idx]
+        if meas_id is None or meas_id not in by_id:
+            return _slot_text(None, idx == cursor_idx)
+        imp = format_imperial(by_id[meas_id]["result_m"])
+        # Foil-vs-subpurlin slot prefixes the value so the choice is visible.
+        if _SLOT_SPECS[idx][2] == "foil_sub":
+            choice = slot_options.get(idx, "subpurlin")
+            prefix = "sub " if choice == "subpurlin" else "foil "
+            imp = prefix + imp
+        return _slot_text(imp, idx == cursor_idx)
 
-    def fill(slot: str, short: str) -> str:
-        d = slot_data.get(slot)
-        if d is None:
-            return _slot_text(short, None, None, slot == cursor_slot)
-        label, imp, _ = d
-        return _slot_text(short, label, imp, slot == cursor_slot)
+    diagram = _VISUAL_TEMPLATE.format(**{f"S{i}": fill(i) for i in range(N_SLOTS)})
 
-    diagram = _VISUAL_TEMPLATE.format(
-        DECK=fill("DECK", "DECK"),
-        FOIL=fill("FOIL", "FOIL/SUBPURLIN"),
-        PURLIN=fill("PURLIN", "PURLIN"),
-        BEAM=fill("BEAM", "BEAM"),
-    )
-
+    extras = unassigned_meas_ids or []
     if extras:
-        extra_lines = ["", "[dim italic]Other labeled members:[/dim italic]"]
-        for lbl, imp, idx in extras:
-            mark = "[bold cyan]→[/bold cyan] " if idx == cursor_idx else "  "
-            extra_lines.append(f"{mark}{lbl}  [bold]{imp}[/bold]")
-        diagram += "\n".join(extra_lines)
+        lines = ["", "[dim italic]Other measurements (no slot):[/dim italic]"]
+        for mid in extras:
+            m = by_id.get(mid)
+            if m is None:
+                continue
+            lines.append(f"  {format_imperial(m['result_m'])}  [dim](meas #{mid})[/dim]")
+        diagram += "\n".join(lines)
 
     return diagram
 
@@ -207,31 +213,46 @@ class PipeSizePicker(ModalScreen[str | None]):
 class SetupReviewScreen(ModalScreen[bool]):
     """Modal for reviewing a setup's measurements and assigning labels.
 
+    Slot model: the 7-slot diagram is the primary view. Measurements drop
+    in top-down by Z; the user pushes them down (J) to land in the right
+    structural slot, leaving gaps above. Each slot's position determines
+    the label written to the store on confirm.
+
     Returns True if the user confirmed (Enter), False if cancelled (Esc).
 
-    Per-row keys:
-      1-6: pick from PRESET_LABELS (6 = pipe → opens PipeSizePicker)
-      t: free-form custom label
-      x: clear label
-      j/k or arrows: navigate
+    Visual-mode keys (default):
+      j/k or arrows : move cursor between slots (incl. empty)
+      J             : push current measurement and everything below DOWN by 1
+                      (creates a gap above; only works if there's an empty
+                      slot somewhere below)
+      K             : pull current measurement UP by 1 (only if slot above
+                      is empty) — undo for J
+      f             : on the FOIL/SUBPURLIN slot, toggle which label applies
+      p             : on a PIPE slot, open size picker (default 2-1/2")
+      x             : clear current slot (measurement becomes unassigned)
+      t             : free-form custom label override on the cursor's measurement
+      v             : toggle to flat table view
 
     Footer keys:
       Enter: save + mark confirmed
-      s: save drafts (don't confirm)
-      Esc: cancel without saving
+      s    : save drafts (don't confirm)
+      Esc  : cancel without saving
     """
 
     BINDINGS = [
-        # priority=True so DataTable doesn't eat Enter for row-selection
+        # priority=True so child widgets don't eat Enter
         Binding("enter", "confirm", "Confirm", priority=True),
         Binding("escape", "cancel", "Cancel"),
         Binding("s", "save_draft", "Save draft"),
-        Binding("j,down", "next", "Next row"),
-        Binding("k,up", "prev", "Prev row"),
-        Binding("x", "clear", "Clear label"),
+        Binding("j,down", "next", "Next slot"),
+        Binding("k,up", "prev", "Prev slot"),
+        Binding("J,shift+down", "push_down", "Push down"),
+        Binding("K,shift+up", "push_up", "Push up"),
+        Binding("f", "toggle_foil", "Foil↔Sub"),
+        Binding("p", "pick_pipe_size", "Pipe size"),
+        Binding("x", "clear", "Clear slot"),
         Binding("t", "custom", "Custom"),
-        Binding("v", "toggle_visual", "Visual view"),
-        # 1-6 fire via on_key
+        Binding("v", "toggle_view", "Toggle view"),
     ]
 
     DEFAULT_CSS = """
@@ -244,7 +265,7 @@ class SetupReviewScreen(ModalScreen[bool]):
         padding: 1 2;
     }
     DataTable { height: auto; max-height: 20; }
-    #review-visual { height: auto; max-height: 30; padding: 1 0; }
+    #review-visual { height: auto; max-height: 32; padding: 1 0; }
     #review-visual.hidden { display: none; }
     DataTable.hidden { display: none; }
     #custom-input { dock: bottom; height: 3; }
@@ -258,42 +279,48 @@ class SetupReviewScreen(ModalScreen[bool]):
         `on_apply(labels_by_meas_id, confirmed)` is called when the user saves."""
         super().__init__()
         self.setup_id = setup_id
-        # Reverse so highest Z is row 0
+        # Reverse so highest Z is members[0]
         self.members = list(reversed(list(members)))
         self.on_apply = on_apply
-        self.labels: dict[int, str | None] = {}
-        # Pre-fill with existing labels or suggestions. Suggestions are in
-        # ascending Z order (beam → … → deck); since our display is now
-        # descending, reverse them so deck lands on the top row.
-        suggestions = list(reversed(suggest_labels(len(self.members))))
+
+        # Slot assignment: slot index → meas_id (or None for empty).
+        # Default fill: top-down by Z, no gaps. Members beyond N_SLOTS
+        # land in `unassigned` and surface below the diagram.
+        self.slot_assignment: list[int | None] = [None] * N_SLOTS
+        self.unassigned: list[int] = []
         for i, m in enumerate(self.members):
-            existing = m["setup_label"]
-            if existing:
-                self.labels[m["meas_id"]] = existing
-            elif i < len(suggestions):
-                self.labels[m["meas_id"]] = suggestions[i]
+            if i < N_SLOTS:
+                self.slot_assignment[i] = m["meas_id"]
             else:
-                self.labels[m["meas_id"]] = None
-        self.cursor_row = 0
+                self.unassigned.append(m["meas_id"])
+
+        # Per-slot overrides: foil_sub slots store 'foil' or 'subpurlin';
+        # pipe slots store the size string.
+        self.slot_options: dict[int, str] = {}
+
+        self.cursor_idx = 0          # slot cursor (visual mode)
+        self.labels: dict[int, str | None] = {}  # populated on confirm
         self._custom_active = False
-        self._visual_mode = False
+        self._visual_mode = True     # visual is now the default
 
     def compose(self) -> ComposeResult:
         with Vertical(id="review-box"):
             yield Static(f"[bold]Setup {self.setup_id}[/bold]  —  "
                          f"{len(self.members)} member(s)  (sorted high → low)",
                          id="review-title")
-            preset_help = "  ".join(f"[bold cyan]{i+1}[/bold cyan]={lbl.split('-')[-1]}"
-                                     for i, lbl in enumerate(PRESET_LABELS))
             yield Static(
-                f"Pick a label for the highlighted row:  {preset_help}\n"
-                f"[bold cyan]t[/bold cyan]=custom · "
-                f"[bold cyan]x[/bold cyan]=clear+collapse · "
-                f"[bold cyan]j/k[/bold cyan]=move · "
-                f"[bold cyan]v[/bold cyan]=toggle visual"
+                "[bold cyan]j/k[/bold cyan]=move · "
+                "[bold cyan]J/K[/bold cyan]=push down/up · "
+                "[bold cyan]f[/bold cyan]=foil↔sub · "
+                "[bold cyan]p[/bold cyan]=pipe size · "
+                "[bold cyan]x[/bold cyan]=clear · "
+                "[bold cyan]t[/bold cyan]=custom · "
+                "[bold cyan]v[/bold cyan]=table view",
+                id="review-help",
             )
-            yield DataTable(id="review-table", cursor_type="row")
-            yield Static("", id="review-visual", classes="hidden")
+            yield Static("", id="review-visual")
+            yield DataTable(id="review-table", cursor_type="row",
+                             classes="hidden")
             yield Static(
                 "[bold green]Enter[/bold green]=confirm & save · "
                 "[bold yellow]s[/bold yellow]=save as draft · "
@@ -303,26 +330,38 @@ class SetupReviewScreen(ModalScreen[bool]):
 
     def on_mount(self) -> None:
         table = self.query_one("#review-table", DataTable)
-        table.add_columns("Z", "Result", "Imperial", "Label")
+        table.add_columns("Z", "Result", "Imperial", "Slot / Label")
         self._render_rows()
-        table.move_cursor(row=0)
+        self._render_visual()
+
+    # -- rendering ----------------------------------------------------------
+
+    def _render_visual(self) -> None:
+        view = self.query_one("#review-visual", Static)
+        view.update(render_visual_stack(
+            self.members, self.slot_assignment, self.slot_options,
+            self.cursor_idx, self.unassigned,
+        ))
 
     def _render_rows(self) -> None:
         table = self.query_one("#review-table", DataTable)
         table.clear()
+        # Build a meas_id → slot_idx reverse map so each member's row shows
+        # its current slot label.
+        slot_by_meas: dict[int, int] = {
+            mid: i for i, mid in enumerate(self.slot_assignment) if mid is not None
+        }
         for i, m in enumerate(self.members):
-            label = self.labels.get(m["meas_id"]) or "[dim]—[/dim]"
+            mid = m["meas_id"]
+            slot_idx = slot_by_meas.get(mid)
+            if slot_idx is None:
+                cell = "[dim]unassigned[/dim]"
+            else:
+                cell = f"{_SLOT_SPECS[slot_idx][0]}"
             table.add_row(str(i + 1), f"{m['result_m']:.4f} m",
-                          format_imperial(m["result_m"]), label)
-        # If visual mode is on, refresh that too
-        if self._visual_mode:
-            self._render_visual()
+                          format_imperial(m["result_m"]), cell)
 
-    def _render_visual(self) -> None:
-        view = self.query_one("#review-visual", Static)
-        view.update(render_visual_stack(self.members, self.labels, self.cursor_row))
-
-    def action_toggle_visual(self) -> None:
+    def action_toggle_view(self) -> None:
         self._visual_mode = not self._visual_mode
         table = self.query_one("#review-table", DataTable)
         view = self.query_one("#review-visual", Static)
@@ -331,46 +370,107 @@ class SetupReviewScreen(ModalScreen[bool]):
             table.add_class("hidden")
             view.remove_class("hidden")
         else:
+            self._render_rows()
             table.remove_class("hidden")
             view.add_class("hidden")
 
-    def _current_meas_id(self) -> int | None:
-        if 0 <= self.cursor_row < len(self.members):
-            return self.members[self.cursor_row]["meas_id"]
-        return None
+    # -- navigation + slot manipulation -------------------------------------
 
     def action_next(self) -> None:
-        if self.cursor_row < len(self.members) - 1:
-            self.cursor_row += 1
-            self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
-            if self._visual_mode:
-                self._render_visual()
+        if self.cursor_idx < N_SLOTS - 1:
+            self.cursor_idx += 1
+            self._render_visual()
 
     def action_prev(self) -> None:
-        if self.cursor_row > 0:
-            self.cursor_row -= 1
-            self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
-            if self._visual_mode:
-                self._render_visual()
+        if self.cursor_idx > 0:
+            self.cursor_idx -= 1
+            self._render_visual()
+
+    def action_push_down(self) -> None:
+        """Push the cursor's measurement down by one slot. Cascades
+        everything from the cursor downward; requires at least one empty
+        slot at or below the last currently-occupied slot."""
+        idx = self.cursor_idx
+        if self.slot_assignment[idx] is None:
+            return
+        # Find the last non-empty slot from idx onward.
+        last = idx
+        while last < N_SLOTS - 1 and self.slot_assignment[last + 1] is not None:
+            last += 1
+        if last == N_SLOTS - 1:
+            self.app.bell()
+            return  # No room to push without losing the bottom item
+        # Shift right by 1
+        for i in range(last, idx - 1, -1):
+            self.slot_assignment[i + 1] = self.slot_assignment[i]
+            # Carry per-slot options along with the measurement
+            if i in self.slot_options:
+                self.slot_options[i + 1] = self.slot_options.pop(i)
+        self.slot_assignment[idx] = None
+        self.cursor_idx = idx + 1
+        self._render_visual()
+
+    def action_push_up(self) -> None:
+        """Pull the cursor's measurement up one slot. Single-step undo for J;
+        requires the slot above to be empty."""
+        idx = self.cursor_idx
+        if idx == 0 or self.slot_assignment[idx] is None:
+            return
+        if self.slot_assignment[idx - 1] is not None:
+            self.app.bell()
+            return
+        self.slot_assignment[idx - 1] = self.slot_assignment[idx]
+        self.slot_assignment[idx] = None
+        if idx in self.slot_options:
+            self.slot_options[idx - 1] = self.slot_options.pop(idx)
+        self.cursor_idx = idx - 1
+        self._render_visual()
 
     def action_clear(self) -> None:
-        """Clear the current row's label AND collapse labels below upward.
-
-        If row N is cleared, every labeled row N+1, N+2, … shifts its label
-        up by one position (last labeled row becomes empty). This avoids
-        re-labeling everything when one slot is removed."""
-        idx = self.cursor_row
-        if not (0 <= idx < len(self.members)):
+        """Clear current slot — measurement becomes unassigned."""
+        idx = self.cursor_idx
+        mid = self.slot_assignment[idx]
+        if mid is None:
             return
-        # Shift labels: row[i] gets row[i+1]'s label, for i = idx..len-2
-        for i in range(idx, len(self.members) - 1):
-            self.labels[self.members[i]["meas_id"]] = self.labels[self.members[i + 1]["meas_id"]]
-        # Last row becomes empty
-        self.labels[self.members[-1]["meas_id"]] = None
-        self._render_rows()
+        self.slot_assignment[idx] = None
+        self.slot_options.pop(idx, None)
+        if mid not in self.unassigned:
+            self.unassigned.append(mid)
+        self._render_visual()
+
+    def action_toggle_foil(self) -> None:
+        """On a FOIL/SUBPURLIN slot, flip the label between subpurlin and foil."""
+        idx = self.cursor_idx
+        if _SLOT_SPECS[idx][2] != "foil_sub":
+            return
+        if self.slot_assignment[idx] is None:
+            return
+        current = self.slot_options.get(idx, "subpurlin")
+        self.slot_options[idx] = "foil" if current == "subpurlin" else "subpurlin"
+        self._render_visual()
+
+    def action_pick_pipe_size(self) -> None:
+        """On a PIPE slot, open the size picker."""
+        idx = self.cursor_idx
+        if _SLOT_SPECS[idx][2] != "pipe":
+            return
+        if self.slot_assignment[idx] is None:
+            return
+
+        def _on_size(size: str | None) -> None:
+            if size:
+                self.slot_options[idx] = size
+                self._render_visual()
+
+        self.app.push_screen(PipeSizePicker(), _on_size)
 
     def action_custom(self) -> None:
+        """Custom label override for the cursor's measurement. Bypasses the
+        slot-derived label entirely (recorded as a labels-dict override
+        applied on confirm)."""
         if self._custom_active:
+            return
+        if self.slot_assignment[self.cursor_idx] is None:
             return
         self._custom_active = True
         prompt = Input(placeholder="custom label", id="custom-input")
@@ -380,51 +480,40 @@ class SetupReviewScreen(ModalScreen[bool]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "custom-input":
             return
-        mid = self._current_meas_id()
+        mid = self.slot_assignment[self.cursor_idx]
         if mid is not None and event.value.strip():
             self.labels[mid] = event.value.strip()
-            self._render_rows()
+            self._render_visual()
         event.input.remove()
         self._custom_active = False
 
-    def on_key(self, event) -> None:
-        if self._custom_active:
-            return
-        if event.key in ("1", "2", "3", "4", "5", "6"):
-            idx = int(event.key) - 1
-            label = PRESET_LABELS[idx]
-            mid = self._current_meas_id()
-            if mid is None:
-                return
-            event.stop()
-            if label == "bottom-of-pipe":
-                # Use callback pattern (works across Textual versions, doesn't
-                # require an awaitable push_screen result).
-                def _on_pipe(size: str | None) -> None:
-                    if size:
-                        self.labels[mid] = format_pipe_label(size)
-                        self._render_rows()
-                        self._advance()
-                self.app.push_screen(PipeSizePicker(), _on_pipe)
-            else:
-                self.labels[mid] = label
-                self._render_rows()
-                self._advance()
+    # -- confirm flow -------------------------------------------------------
 
-    def _advance(self) -> None:
-        """Auto-move cursor to next row after a label is applied."""
-        if self.cursor_row < len(self.members) - 1:
-            self.cursor_row += 1
-            self.query_one("#review-table", DataTable).move_cursor(row=self.cursor_row)
-            if self._visual_mode:
-                self._render_visual()
+    def _materialize_labels(self) -> dict[int, str | None]:
+        """Compute final labels for every member based on slot assignment.
+        Custom overrides in self.labels win; assigned slots get the
+        slot-derived label; unassigned members get None."""
+        out: dict[int, str | None] = {}
+        for i, mid in enumerate(self.slot_assignment):
+            if mid is None:
+                continue
+            if mid in self.labels and self.labels[mid] is not None:
+                out[mid] = self.labels[mid]
+            else:
+                out[mid] = slot_label_for(i, self.slot_options)
+        for mid in self.unassigned:
+            out[mid] = self.labels.get(mid)  # may be None or custom
+        # Members with no entry yet (shouldn't happen, but be safe)
+        for m in self.members:
+            out.setdefault(m["meas_id"], None)
+        return out
 
     def action_confirm(self) -> None:
-        self.on_apply(self.labels, True)
+        self.on_apply(self._materialize_labels(), True)
         self.dismiss(True)
 
     def action_save_draft(self) -> None:
-        self.on_apply(self.labels, False)
+        self.on_apply(self._materialize_labels(), False)
         self.dismiss(True)
 
     def action_cancel(self) -> None:
