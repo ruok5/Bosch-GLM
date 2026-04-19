@@ -16,59 +16,136 @@ from ..station import (
 )
 
 
+# Verbatim canonical roof-section diagram from the user's hand sketch.
+# Four named label slots on the left tied to physical structural members;
+# the right side is a stylized cross-section showing those members plus a
+# pipe descending through. Each {SLOT} placeholder is exactly 20 chars wide
+# so the diagram's box borders line up.
+_VISUAL_TEMPLATE = (
+    "                           *────────▲────┬──┬──────────────────────────┬──┬───────*\n"
+    "                                    │    │  │                          │  │\n"
+    "                                    │    │  │                          │  │\n"
+    "                                    │    │  │                          │  │\n"
+    "┌────────────────────┐     *────────┼────┴─▲┴────────────────────────┬─┴──┴──┬────*\n"
+    "│{DECK}├──────────────┘      │                         │       │\n"
+    "└────────────────────┘                     │                         │       │\n"
+    "                                           │                         │       │\n"
+    "                                           │                         │       │\n"
+    "┌────────────────────┐                     │                         │       │\n"
+    "│{FOIL}├─────────────────────┘                         │       │\n"
+    "└────────────────────┘                                               │       │\n"
+    "                                                                     │       │\n"
+    "                           *─────────────▲───────────────────────────┤       ├────*\n"
+    "┌────────────────────┐                   │                           │       │\n"
+    "│{PURLIN}├───────────────────┘                           │       │\n"
+    "└────────────────────┘                                               │       │\n"
+    "                                                                     │       │\n"
+    "                                                                     │       │\n"
+    "┌────────────────────┐                                               │       │\n"
+    "│{BEAM}├───────────────────────────────────────────────┼───┐   │\n"
+    "└────────────────────┘                                               │   │   │\n"
+    "                                                                     │   │   │\n"
+    "                                                                     │   │   │\n"
+    "                                                                     │   │   │\n"
+    "                                                                     └───▼───┘\n"
+)
+_SLOT_WIDTH = 20  # interior width of each label box
+
+
+def _slot_text(short_name: str, full_label: str | None,
+               value_imperial: str | None,
+               highlighted: bool) -> str:
+    """Format the inner content of a 20-char label slot.
+
+    The slot's position in the diagram already conveys WHICH structural
+    element it represents, so the box itself just shows the imperial
+    value (or the short_name placeholder if unassigned). Truncation is
+    safe because we never try to fit both the name and the value.
+    """
+    if full_label is None:
+        body = short_name
+        text = body.center(_SLOT_WIDTH)
+        return f"[dim italic]{text}[/dim italic]"
+    body = (value_imperial or short_name)
+    if len(body) > _SLOT_WIDTH:
+        body = body[:_SLOT_WIDTH]
+    text = body.center(_SLOT_WIDTH)
+    # If the assigned label is the foil/subpurlin slot but ambiguous which
+    # one was chosen, prefix with an indicator
+    if full_label == "bottom-of-subpurlin" and short_name == "FOIL/SUBPURLIN":
+        body = f"sub {value_imperial}"
+        if len(body) > _SLOT_WIDTH:
+            body = body[:_SLOT_WIDTH]
+        text = body.center(_SLOT_WIDTH)
+    elif full_label == "bottom-of-foil" and short_name == "FOIL/SUBPURLIN":
+        body = f"foil {value_imperial}"
+        if len(body) > _SLOT_WIDTH:
+            body = body[:_SLOT_WIDTH]
+        text = body.center(_SLOT_WIDTH)
+    if highlighted:
+        return f"[bold cyan reverse]{text}[/bold cyan reverse]"
+    return f"[bold green]{text}[/bold green]"
+
+
+# Mapping from the canonical preset labels to slot names used in the diagram.
+# foil and subpurlin share a slot per the user's clarification that they
+# typically sit at the same Z when both are present.
+_LABEL_TO_SLOT = {
+    "bottom-of-deck":      "DECK",
+    "bottom-of-foil":      "FOIL",
+    "bottom-of-subpurlin": "FOIL",   # foil/subpurlin slot
+    "bottom-of-purlin":    "PURLIN",
+    "bottom-of-beam":      "BEAM",
+}
+
+
 def render_visual_stack(members: list, labels: dict[int, str | None],
-                        cursor_idx: int = -1,
-                        box_width: int = 24,
-                        min_gap_rows: int = 1,
-                        target_max_gap_rows: int = 8) -> str:
-    """Render a vertical stack diagram of station members.
+                        cursor_idx: int = -1) -> str:
+    """Render the verbatim roof-section diagram with measured values dropped
+    into their named label slots. Members whose labels aren't in the canonical
+    set (e.g. bottom-of-pipe(<size>) or custom labels) are listed below the
+    diagram so they're not lost.
 
-    Members are expected in DESCENDING Z (highest first). Vertical spacing
-    between boxes is proportional to the gap between adjacent measurements.
-    Each box shows the label (or [unlabeled]); a horizontal connector trails
-    off to the imperial value. The cursor row's box is highlighted.
-
-    Returns Rich-markup text suitable for a Static widget."""
-    if not members:
-        return "[dim](no members)[/dim]"
-
-    # Compute deltas (in inches) between adjacent members
-    deltas_in = []
-    for i in range(len(members) - 1):
-        d_m = members[i]["result_m"] - members[i + 1]["result_m"]
-        deltas_in.append(max(0.0, d_m * IN_PER_M))
-    max_delta = max(deltas_in, default=1.0) or 1.0
-    scale = max_delta / target_max_gap_rows
-
-    out: list[str] = []
-    indent = " " * box_width
+    Highlights the slot that matches the cursor row, if any."""
+    # Build a map: slot → (label_str, value, member_idx)
+    slot_data: dict[str, tuple[str, str, int]] = {}
+    extras: list[tuple[str, str, int]] = []  # (label, value, idx) for non-slot labels
     for i, m in enumerate(members):
-        label = labels.get(m["meas_id"]) or "[dim italic](unlabeled)[/dim italic]"
+        label = labels.get(m["meas_id"])
         imp = format_imperial(m["result_m"])
-        # Color the box border by cursor focus
-        is_cursor = (i == cursor_idx)
-        border_color = "bold cyan" if is_cursor else "white"
-        connector_color = "bold cyan" if is_cursor else "dim"
-        box_top = f"[{border_color}]┌{'─' * (box_width - 2)}┐[/{border_color}]"
-        box_mid = (f"[{border_color}]│[/{border_color}] "
-                   f"{label:^{box_width - 4}} "
-                   f"[{border_color}]│[/{border_color}]"
-                   f"[{connector_color}]──────[/{connector_color}] "
-                   f"[bold]{imp}[/bold]")
-        box_bot = f"[{border_color}]└{'─' * (box_width - 2)}┘[/{border_color}]"
-        out.append(box_top)
-        out.append(box_mid)
-        out.append(box_bot)
-        if i < len(members) - 1:
-            delta = deltas_in[i]
-            rows = max(min_gap_rows, int(round(delta / scale))) if scale else min_gap_rows
-            mid_x = (box_width // 2) - 1
-            spacer = " " * mid_x + "[dim]│[/dim]"
-            for _ in range(rows):
-                out.append(spacer)
-            # Annotate the gap with the delta
-            out.append(" " * (box_width // 2 + 2) + f"[dim italic]{delta:.1f}\" gap[/dim italic]")
-    return "\n".join(out)
+        slot = _LABEL_TO_SLOT.get(label) if label else None
+        if slot:
+            slot_data[slot] = (label, imp, i)
+        elif label:
+            extras.append((label, imp, i))
+
+    cursor_slot: str | None = None
+    if 0 <= cursor_idx < len(members):
+        cl = labels.get(members[cursor_idx]["meas_id"])
+        cursor_slot = _LABEL_TO_SLOT.get(cl) if cl else None
+
+    def fill(slot: str, short: str) -> str:
+        d = slot_data.get(slot)
+        if d is None:
+            return _slot_text(short, None, None, slot == cursor_slot)
+        label, imp, _ = d
+        return _slot_text(short, label, imp, slot == cursor_slot)
+
+    diagram = _VISUAL_TEMPLATE.format(
+        DECK=fill("DECK", "DECK"),
+        FOIL=fill("FOIL", "FOIL/SUBPURLIN"),
+        PURLIN=fill("PURLIN", "PURLIN"),
+        BEAM=fill("BEAM", "BEAM"),
+    )
+
+    if extras:
+        extra_lines = ["", "[dim italic]Other labeled members:[/dim italic]"]
+        for lbl, imp, idx in extras:
+            mark = "[bold cyan]→[/bold cyan] " if idx == cursor_idx else "  "
+            extra_lines.append(f"{mark}{lbl}  [bold]{imp}[/bold]")
+        diagram += "\n".join(extra_lines)
+
+    return diagram
 
 
 class PipeSizePicker(ModalScreen[str | None]):
