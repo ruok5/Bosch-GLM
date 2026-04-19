@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bosch-glm"
-version = "0.1.18"
+version = "0.2.0"
 description = "Stream measurements from a Bosch GLM laser rangefinder over BLE."
 readme = "README.md"
 license = { file = "LICENSE" }

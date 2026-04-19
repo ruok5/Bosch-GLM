@@ -1,15 +1,18 @@
-"""Station tracking: group consecutive vertical-elevation shots into one
-named X-Y datum + label catalog + station CLI.
+"""Setup tracking: group consecutive shots within an idle window into one
+named observation setup + label catalog + setup CLI.
 
-A station is a batch of measurements taken within a short idle window at
-the same location. The user shoots 3–6 vertical elevations, the tracker
-auto-groups them, and a review modal lets them assign labels from the
-preset palette in Z-order.
+A "setup" (surveyor sense — one instrument setup at a station) is a batch
+of consecutive measurements taken within a short idle window. The user
+shoots 3–6 vertical elevations, the tracker auto-groups them, and a
+review modal lets them assign labels from the preset palette in Z-order.
+
+"Station" is reserved for the X-Y datum (a place that may be re-occupied
+across multiple setups over time) — that's a separate concept handled
+by the site/location layer.
 """
 from __future__ import annotations
 
 import argparse
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -41,7 +44,7 @@ def format_pipe_label(size: str) -> str:
 
 
 def suggest_labels(member_count: int) -> list[str]:
-    """Default Z-order assignment for an N-member station — applies the
+    """Default Z-order assignment for an N-member setup — applies the
     first N labels from DEFAULT_Z_ORDER. Pipe is left for the user to
     swap in manually since it floats."""
     return DEFAULT_Z_ORDER[:member_count]
@@ -51,60 +54,60 @@ def suggest_labels(member_count: int) -> list[str]:
 
 
 @dataclass
-class StationOpened:
-    station_id: int  # captured_at_ms of first member
+class SetupOpened:
+    setup_id: int  # captured_at_ms of first member
 
 
 @dataclass
 class MemberAdded:
-    station_id: int
+    setup_id: int
     meas_id: int
 
 
 @dataclass
-class StationClosed:
-    station_id: int
+class SetupClosed:
+    setup_id: int
     member_meas_ids: list[int] = field(default_factory=list)
 
 
-StationEvent = StationOpened | MemberAdded | StationClosed
+SetupEvent = SetupOpened | MemberAdded | SetupClosed
 
 
-class StationTracker:
-    """Time-window grouping of measurements into stations.
+class SetupTracker:
+    """Time-window grouping of measurements into setups.
 
     Each call to feed() with a (meas_id, captured_at_ms) potentially
-    emits one or two events: closing the previous station (if the new
+    emits one or two events: closing the previous setup (if the new
     measurement falls outside the idle window) AND opening/extending
     one for the new measurement.
     """
 
-    def __init__(self, idle_window_ms: int = 60_000) -> None:
+    def __init__(self, idle_window_ms: int = 20_000) -> None:
         self.idle_window_ms = idle_window_ms
         self._open_id: int | None = None
         self._members: list[int] = []
         self._last_ts_ms: int | None = None
 
-    def feed(self, meas_id: int, ts_ms: int) -> list[StationEvent]:
-        events: list[StationEvent] = []
+    def feed(self, meas_id: int, ts_ms: int) -> list[SetupEvent]:
+        events: list[SetupEvent] = []
         if self._open_id is not None and self._last_ts_ms is not None:
             if ts_ms - self._last_ts_ms > self.idle_window_ms:
-                events.append(StationClosed(self._open_id, list(self._members)))
+                events.append(SetupClosed(self._open_id, list(self._members)))
                 self._open_id = None
                 self._members = []
         if self._open_id is None:
             self._open_id = ts_ms
-            events.append(StationOpened(self._open_id))
+            events.append(SetupOpened(self._open_id))
         self._members.append(meas_id)
         events.append(MemberAdded(self._open_id, meas_id))
         self._last_ts_ms = ts_ms
         return events
 
-    def force_close(self) -> StationClosed | None:
-        """Close any open station explicitly (e.g. on app exit)."""
+    def force_close(self) -> SetupClosed | None:
+        """Close any open setup explicitly (e.g. on app exit)."""
         if self._open_id is None:
             return None
-        ev = StationClosed(self._open_id, list(self._members))
+        ev = SetupClosed(self._open_id, list(self._members))
         self._open_id = None
         self._members = []
         self._last_ts_ms = None
@@ -122,61 +125,61 @@ class StationTracker:
 # --- CLI -------------------------------------------------------------------
 
 
-def _list_stations(store: Store, limit: int = 50) -> None:
-    rows = store.recent_stations(limit=limit)
+def _list_setups(store: Store, limit: int = 50) -> None:
+    rows = store.recent_setups(limit=limit)
     if not rows:
-        print("(no stations yet)")
+        print("(no setups yet)")
         return
-    print(f"{'station_id':>14}  {'when':<20}  {'count':>5}  {'status':<10}  site")
+    print(f"{'setup_id':>14}  {'when':<20}  {'count':>5}  {'status':<10}  site")
     for r in rows:
         ts = datetime.fromtimestamp(r["first_at"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
         site = r["site_name"] or ""
-        print(f"{r['station_id']:>14}  {ts:<20}  {r['member_count']:>5}  "
+        print(f"{r['setup_id']:>14}  {ts:<20}  {r['member_count']:>5}  "
               f"{r['status'] or 'draft':<10}  {site}")
 
 
-def _show_station(store: Store, station_id: int) -> None:
-    members = store.station_members(station_id)
+def _show_setup(store: Store, setup_id: int) -> None:
+    members = store.setup_members(setup_id)
     if not members:
-        print(f"(no members for station {station_id})")
+        print(f"(no members for setup {setup_id})")
         return
-    print(f"Station {station_id}  —  {len(members)} member(s)\n")
+    print(f"Setup {setup_id}  —  {len(members)} member(s)\n")
     print(f"{'meas_id':>7}  {'result_m':>10}  {'imperial':<14}  label")
     for m in members:
-        label = m["station_label"] or ""
+        label = m["setup_label"] or ""
         print(f"{m['meas_id']:>7}  {m['result_m']:>10.4f}  "
               f"{format_imperial(m['result_m']):<14}  {label}")
 
 
-def _confirm_station(store: Store, station_id: int) -> None:
-    n = store.confirm_station(station_id)
-    print(f"confirmed {n} member(s) of station {station_id}")
+def _confirm_setup(store: Store, setup_id: int) -> None:
+    n = store.confirm_setup(setup_id)
+    print(f"confirmed {n} member(s) of setup {setup_id}")
 
 
-def station_main() -> None:
+def setup_main() -> None:
     from . import __version__
-    parser = argparse.ArgumentParser(description="Inspect or confirm stations.")
+    parser = argparse.ArgumentParser(description="Inspect or confirm setups.")
     parser.add_argument("--version", "-V", action="version",
                         version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list", help="list recent stations")
-    p_show = sub.add_parser("show", help="show members of a station")
-    p_show.add_argument("station_id", type=int)
-    p_confirm = sub.add_parser("confirm", help="mark a station as confirmed")
-    p_confirm.add_argument("station_id", type=int)
+    sub.add_parser("list", help="list recent setups")
+    p_show = sub.add_parser("show", help="show members of a setup")
+    p_show.add_argument("setup_id", type=int)
+    p_confirm = sub.add_parser("confirm", help="mark a setup as confirmed")
+    p_confirm.add_argument("setup_id", type=int)
     args = parser.parse_args()
 
     store = Store()
     try:
         if args.cmd == "list":
-            _list_stations(store)
+            _list_setups(store)
         elif args.cmd == "show":
-            _show_station(store, args.station_id)
+            _show_setup(store, args.setup_id)
         elif args.cmd == "confirm":
-            _confirm_station(store, args.station_id)
+            _confirm_setup(store, args.setup_id)
     finally:
         store.close()
 
 
 if __name__ == "__main__":
-    station_main()
+    setup_main()

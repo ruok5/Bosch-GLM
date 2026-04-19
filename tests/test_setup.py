@@ -1,6 +1,6 @@
-from glm.station import (
+from glm.setup import (
     DEFAULT_Z_ORDER, PIPE_SIZES, PIPE_SIZE_DEFAULT, PRESET_LABELS,
-    MemberAdded, StationClosed, StationOpened, StationTracker,
+    MemberAdded, SetupClosed, SetupOpened, SetupTracker,
     format_pipe_label, suggest_labels,
 )
 
@@ -33,30 +33,30 @@ def test_suggest_labels_for_n_members():
 
 
 def test_tracker_groups_within_window():
-    t = StationTracker(idle_window_ms=60_000)
+    t = SetupTracker(idle_window_ms=60_000)
     e1 = t.feed(meas_id=1, ts_ms=0)
-    assert any(isinstance(e, StationOpened) for e in e1)
+    assert any(isinstance(e, SetupOpened) for e in e1)
     assert any(isinstance(e, MemberAdded) for e in e1)
     e2 = t.feed(meas_id=2, ts_ms=10_000)
-    assert not any(isinstance(e, StationClosed) for e in e2)
-    assert not any(isinstance(e, StationOpened) for e in e2)
+    assert not any(isinstance(e, SetupClosed) for e in e2)
+    assert not any(isinstance(e, SetupOpened) for e in e2)
 
 
 def test_tracker_closes_on_idle_gap():
-    t = StationTracker(idle_window_ms=5_000)
+    t = SetupTracker(idle_window_ms=5_000)
     t.feed(1, 0)
     t.feed(2, 1_000)
     events = t.feed(3, 10_000)  # 9s gap > 5s window
-    closed = [e for e in events if isinstance(e, StationClosed)]
-    opened = [e for e in events if isinstance(e, StationOpened)]
+    closed = [e for e in events if isinstance(e, SetupClosed)]
+    opened = [e for e in events if isinstance(e, SetupOpened)]
     assert len(closed) == 1
     assert closed[0].member_meas_ids == [1, 2]
     assert len(opened) == 1
-    assert opened[0].station_id == 10_000
+    assert opened[0].setup_id == 10_000
 
 
 def test_tracker_force_close_emits_event():
-    t = StationTracker()
+    t = SetupTracker()
     t.feed(1, 0)
     t.feed(2, 100)
     ev = t.force_close()
@@ -66,12 +66,17 @@ def test_tracker_force_close_emits_event():
 
 
 def test_tracker_force_close_no_op_when_empty():
-    t = StationTracker()
+    t = SetupTracker()
     assert t.force_close() is None
 
 
-def test_station_id_is_first_member_timestamp():
-    t = StationTracker()
+def test_setup_id_is_first_member_timestamp():
+    t = SetupTracker()
     events = t.feed(1, ts_ms=12345)
-    opened = [e for e in events if isinstance(e, StationOpened)][0]
-    assert opened.station_id == 12345
+    opened = [e for e in events if isinstance(e, SetupOpened)][0]
+    assert opened.setup_id == 12345
+
+
+def test_tracker_default_idle_window_is_20s():
+    t = SetupTracker()
+    assert t.idle_window_ms == 20_000

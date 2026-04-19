@@ -10,7 +10,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Static
 
 from ..format import IN_PER_M, format_imperial
-from ..station import (
+from ..setup import (
     PIPE_SIZES, PIPE_SIZE_DEFAULT, PRESET_LABELS,
     format_pipe_label, suggest_labels,
 )
@@ -204,8 +204,8 @@ class PipeSizePicker(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class StationReviewScreen(ModalScreen[bool]):
-    """Modal for reviewing a station's measurements and assigning labels.
+class SetupReviewScreen(ModalScreen[bool]):
+    """Modal for reviewing a setup's measurements and assigning labels.
 
     Returns True if the user confirmed (Enter), False if cancelled (Esc).
 
@@ -235,7 +235,7 @@ class StationReviewScreen(ModalScreen[bool]):
     ]
 
     DEFAULT_CSS = """
-    StationReviewScreen { align: center middle; }
+    SetupReviewScreen { align: center middle; }
     #review-box {
         width: 100;
         height: auto;
@@ -250,14 +250,14 @@ class StationReviewScreen(ModalScreen[bool]):
     #custom-input { dock: bottom; height: 3; }
     """
 
-    def __init__(self, station_id: int, members: list,
+    def __init__(self, setup_id: int, members: list,
                  on_apply: Callable[[dict[int, str | None], bool], None]) -> None:
-        """`members` is a list of sqlite3.Row from store.station_members(); the
+        """`members` is a list of sqlite3.Row from store.setup_members(); the
         store returns ascending Z. We display DESCENDING (highest Z at top)
         because that matches how vertical sections are drawn in CAD.
         `on_apply(labels_by_meas_id, confirmed)` is called when the user saves."""
         super().__init__()
-        self.station_id = station_id
+        self.setup_id = setup_id
         # Reverse so highest Z is row 0
         self.members = list(reversed(list(members)))
         self.on_apply = on_apply
@@ -267,7 +267,7 @@ class StationReviewScreen(ModalScreen[bool]):
         # descending, reverse them so deck lands on the top row.
         suggestions = list(reversed(suggest_labels(len(self.members))))
         for i, m in enumerate(self.members):
-            existing = m["station_label"]
+            existing = m["setup_label"]
             if existing:
                 self.labels[m["meas_id"]] = existing
             elif i < len(suggestions):
@@ -280,7 +280,7 @@ class StationReviewScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="review-box"):
-            yield Static(f"[bold]Station {self.station_id}[/bold]  —  "
+            yield Static(f"[bold]Setup {self.setup_id}[/bold]  —  "
                          f"{len(self.members)} member(s)  (sorted high → low)",
                          id="review-title")
             preset_help = "  ".join(f"[bold cyan]{i+1}[/bold cyan]={lbl.split('-')[-1]}"
@@ -450,10 +450,15 @@ class HelpScreen(ModalScreen[None]):
     """
 
     HELP_TEXT = (
+        "[bold]Setup vs. station[/bold]\n"
+        "  A [bold]setup[/bold] is a batch of consecutive shots taken within a\n"
+        "  short idle window — your vertical stack at one spot. (\"Station\"\n"
+        "  is reserved for the X-Y datum itself.)\n"
+        "\n"
         "[bold]History glyphs (leftmost column)[/bold]\n"
-        "  [dim]◯[/dim]   no station — a one-off shot, not part of a stack\n"
-        "  [bold yellow]◐[/bold yellow]   [yellow]draft station[/yellow] — grouped but not yet reviewed\n"
-        "  [bold green]●[/bold green]   [green]confirmed station[/green] — reviewed and labeled\n"
+        "  [dim]·[/dim]   blank — a singleton, not part of a setup\n"
+        "  [bold yellow]◐[/bold yellow]   [yellow]draft setup[/yellow] — grouped but not yet reviewed\n"
+        "  [bold green]●[/bold green]   [green]confirmed setup[/green] — reviewed and labeled\n"
         "\n"
         "[bold]Label color[/bold]\n"
         "  [yellow]yellow[/yellow] = draft (you can still change it via [bold]l[/bold])\n"
@@ -462,13 +467,13 @@ class HelpScreen(ModalScreen[None]):
         "\n"
         "[bold]Keys[/bold]\n"
         "  [bold]q[/bold] quit       [bold]c[/bold] copy last      [bold]o[/bold] set offset\n"
-        "  [bold]r[/bold] refresh    [bold]s[/bold] sync settings  [bold]l[/bold] review station\n"
+        "  [bold]r[/bold] refresh    [bold]s[/bold] sync settings  [bold]l[/bold] review setup\n"
         "  [bold]D[/bold] show/hide deleted  [bold]U[/bold] undelete last\n"
         "  [bold]?[/bold] this help\n"
         "\n"
-        "[bold]Station gestures[/bold]\n"
-        "  Two error readings within 3s soft-deletes the last good shot.\n"
-        "  Stations close after 60s of inactivity, then await your review."
+        "[bold]Gestures[/bold]\n"
+        "  Two error readings within 3s soft-delete the last good shot.\n"
+        "  Setups auto-close after 20s of inactivity, then await review."
     )
 
     def compose(self) -> ComposeResult:

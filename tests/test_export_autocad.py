@@ -21,29 +21,29 @@ def _m(meas_id: int, result: float, dev_mode: int = 1) -> EDCMeasurement:
 
 
 @pytest.fixture
-def stationed_store():
-    """Store with one confirmed station of 4 labeled measurements."""
+def setup_store():
+    """Store with one confirmed setup of 4 labeled measurements."""
     with tempfile.TemporaryDirectory() as td:
         s = Store(pathlib.Path(td) / "test.sqlite")
         sid = 1000
         # Insert in unsorted order; export should sort by Z
-        s.insert("AA", _m(1, 2.500), station_id=sid); time.sleep(0.001)
-        s.insert("AA", _m(2, 2.200), station_id=sid); time.sleep(0.001)
-        s.insert("AA", _m(3, 2.700), station_id=sid); time.sleep(0.001)
-        s.insert("AA", _m(4, 2.650), station_id=sid)
-        s.set_station_label("AA", 2, "bottom-of-beam")        # 2.200 = lowest
-        s.set_station_label("AA", 1, "bottom-of-purlin")
-        s.set_station_label("AA", 4, 'bottom-of-pipe(4")')
-        s.set_station_label("AA", 3, "bottom-of-deck")        # 2.700 = highest
-        s.confirm_station(sid)
+        s.insert("AA", _m(1, 2.500), setup_id=sid); time.sleep(0.001)
+        s.insert("AA", _m(2, 2.200), setup_id=sid); time.sleep(0.001)
+        s.insert("AA", _m(3, 2.700), setup_id=sid); time.sleep(0.001)
+        s.insert("AA", _m(4, 2.650), setup_id=sid)
+        s.set_setup_label("AA", 2, "bottom-of-beam")        # 2.200 = lowest
+        s.set_setup_label("AA", 1, "bottom-of-purlin")
+        s.set_setup_label("AA", 4, 'bottom-of-pipe(4")')
+        s.set_setup_label("AA", 3, "bottom-of-deck")        # 2.700 = highest
+        s.confirm_setup(sid)
         yield s, sid
         s.close()
 
 
-def test_mleader_orders_members_top_to_bottom(stationed_store):
+def test_mleader_orders_members_top_to_bottom(setup_store):
     """MLEADER output lists highest Z first to match how vertical sections
     are drawn in CAD."""
-    s, sid = stationed_store
+    s, sid = setup_store
     rows = [_row_to_dict(r) for r in s.query()]
     out = io.StringIO()
     to_mleader(rows, out)
@@ -55,26 +55,26 @@ def test_mleader_orders_members_top_to_bottom(stationed_store):
     assert deck_pos < beam_pos
 
 
-def test_mleader_includes_station_header(stationed_store):
-    s, sid = stationed_store
+def test_mleader_includes_setup_header(setup_store):
+    s, sid = setup_store
     rows = [_row_to_dict(r) for r in s.query()]
     out = io.StringIO()
     to_mleader(rows, out)
-    assert "Station " in out.getvalue()
+    assert "Setup " in out.getvalue()
 
 
-def test_mleader_skips_when_no_confirmed_stations(stationed_store):
-    s, _ = stationed_store
-    # Query with include_drafts=False AND no confirmed stations
-    s.draft_station(1000)
+def test_mleader_skips_when_no_confirmed_setups(setup_store):
+    s, _ = setup_store
+    # Query with include_drafts=False AND no confirmed setups
+    s.draft_setup(1000)
     rows = [_row_to_dict(r) for r in s.query(include_drafts=False)]
     out = io.StringIO()
     to_mleader(rows, out)
-    assert "no stations" in out.getvalue()
+    assert "no setups" in out.getvalue()
 
 
-def test_attribs_emits_one_row_per_station(stationed_store):
-    s, sid = stationed_store
+def test_attribs_emits_one_row_per_setup(setup_store):
+    s, sid = setup_store
     rows = [_row_to_dict(r) for r in s.query()]
     out = io.StringIO()
     to_attribs(rows, out)
@@ -82,7 +82,7 @@ def test_attribs_emits_one_row_per_station(stationed_store):
     csv_rows = list(csv.DictReader(out))
     assert len(csv_rows) == 1
     row = csv_rows[0]
-    assert int(row["station_id"]) == sid
+    assert int(row["setup_id"]) == sid
     assert row["BOT_BEAM"] != ""        # filled
     assert row["BOT_PURLIN"] != ""
     assert row["BOT_DECK"] != ""
@@ -92,15 +92,15 @@ def test_attribs_emits_one_row_per_station(stationed_store):
     assert row["BOT_FOIL"] == ""        # not labeled
 
 
-def test_attribs_round_trips_custom_labels(stationed_store):
-    s, _ = stationed_store
-    # Add a station with a custom label
+def test_attribs_round_trips_custom_labels(setup_store):
+    s, _ = setup_store
+    # Add a setup with a custom label
     custom_sid = 2000
-    s.insert("AA", _m(10, 1.5), station_id=custom_sid)
-    s.set_station_label("AA", 10, "weird-detail")
-    s.confirm_station(custom_sid)
+    s.insert("AA", _m(10, 1.5), setup_id=custom_sid)
+    s.set_setup_label("AA", 10, "weird-detail")
+    s.confirm_setup(custom_sid)
 
-    rows = [_row_to_dict(r) for r in s.query(station_id=custom_sid)]
+    rows = [_row_to_dict(r) for r in s.query(setup_id=custom_sid)]
     out = io.StringIO()
     to_attribs(rows, out)
     out.seek(0)
@@ -110,13 +110,13 @@ def test_attribs_round_trips_custom_labels(stationed_store):
     assert "weird-detail" in customs
 
 
-def test_attribs_skips_unstationed_rows(stationed_store):
-    s, _ = stationed_store
-    s.insert("AA", _m(50, 9.9))  # no station_id
+def test_attribs_skips_loose_rows(setup_store):
+    s, _ = setup_store
+    s.insert("AA", _m(50, 9.9))  # no setup_id
     rows = [_row_to_dict(r) for r in s.query()]
     out = io.StringIO()
     to_attribs(rows, out)
     out.seek(0)
     csv_rows = list(csv.DictReader(out))
-    # Only the original station, not the loose row
+    # Only the original setup, not the loose row
     assert len(csv_rows) == 1

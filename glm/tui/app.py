@@ -31,10 +31,10 @@ from ..protocol.messages import (
     DeviceSettings, EDCMeasurement, UNIT_NAMES,
     edc_request_history_item, get_settings_request,
 )
+from ..setup import SetupClosed, SetupTracker
 from ..sites import load_sites, nearest_site
-from ..station import StationClosed, StationTracker
 from ..store import LocationFix, Store
-from .screens import HelpScreen, StationReviewScreen
+from .screens import HelpScreen, SetupReviewScreen
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ class GlmApp(App):
         Binding("o", "set_offset", "Offset"),
         Binding("r", "refresh_history", "Refresh"),
         Binding("s", "fetch_settings", "Sync settings"),
-        Binding("l", "review_station", "Review station"),
+        Binding("l", "review_setup", "Review setup"),
         Binding("D", "toggle_deleted", "Show/hide deleted"),
         Binding("U", "undelete_last", "Undelete"),
         Binding("question_mark", "help", "Help"),
@@ -135,12 +135,12 @@ class GlmApp(App):
     settings: reactive[DeviceSettings | None] = reactive(None, layout=False)
     has_warnings: reactive[bool] = reactive(False)
     catchup_status: reactive[str] = reactive("")
-    station_status: reactive[str] = reactive("")
+    setup_status: reactive[str] = reactive("")
     show_deleted: reactive[bool] = reactive(True)
 
     def __init__(self, store: Store, offset_in: float = 0.0,
                  catchup: bool = False, use_location: bool = True,
-                 sites_path=None, station_idle_s: float = 60.0,
+                 sites_path=None, setup_idle_s: float = 20.0,
                  gestures: bool = True) -> None:
         super().__init__()
         self.store = store
@@ -153,19 +153,19 @@ class GlmApp(App):
         self.location: LocationFix | None = None
         self.site_name: str | None = None
         self._error_clear_timer = None
-        self.station_idle_s = station_idle_s
-        self.station = StationTracker(idle_window_ms=int(station_idle_s * 1000))
+        self.setup_idle_s = setup_idle_s
+        self.setup = SetupTracker(idle_window_ms=int(setup_idle_s * 1000))
         self.err_tracker = ErrorErrorTracker(window_ms=3000) if gestures else None
-        self._last_closed_station: int | None = None
-        self._station_close_timer = None
-        self._station_open_at_ts_ms: int | None = None
-        self._station_countdown_timer = None
+        self._last_closed_setup: int | None = None
+        self._setup_close_timer = None
+        self._setup_open_at_ts_ms: int | None = None
+        self._setup_countdown_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield StatusBar("○ Looking for your GLM…", id="status")
         yield CatchupBanner("", id="catchup", classes="hidden")
-        yield CatchupBanner("", id="station-banner", classes="hidden")
+        yield CatchupBanner("", id="setup-banner", classes="hidden")
         yield ReadingPanel("", id="reading")
         with Horizontal(classes="lower"):
             yield DataTable(id="history", zebra_stripes=True, cursor_type="row")
@@ -176,8 +176,9 @@ class GlmApp(App):
         self.title = "Bosch GLM"
         self.sub_title = f"v{__version__}  ·  offset {self.offset_in:+g}\""
         table = self.query_one("#history", DataTable)
-        # First column is a status glyph: ◯ no station, ◐ draft station, ● confirmed
-        table.add_columns(" ", "Time", "Result", "Imperial", "Station", "Label")
+        # First column is a setup-status glyph: blank for singletons,
+        # ◐ draft setup (yellow), ● confirmed setup (green).
+        table.add_columns(" ", "Time", "Result", "Imperial", "Setup", "Label")
         self._reload_history()
         self.run_worker(self._ble_loop(), exclusive=True, name="ble")
 
@@ -200,8 +201,8 @@ class GlmApp(App):
         else:
             banner.add_class("hidden")
 
-    def watch_station_status(self, value: str) -> None:
-        banner = self.query_one("#station-banner", CatchupBanner)
+    def watch_setup_status(self, value: str) -> None:
+        banner = self.query_one("#setup-banner", CatchupBanner)
         if value:
             banner.update(value)
             banner.remove_class("hidden")
@@ -303,7 +304,7 @@ class GlmApp(App):
         table = self.query_one("#history", DataTable)
         table.clear()
         sql = ("SELECT meas_id, dev_mode, result_m, captured_at, deleted_at, "
-               "       station_id, station_label, station_status "
+               "       setup_id, setup_label, setup_status "
                "FROM measurements")
         params: list = []
         if not self.show_deleted:
@@ -315,19 +316,21 @@ class GlmApp(App):
             ts = datetime.fromtimestamp(r["captured_at"] / 1000).strftime("%H:%M:%S")
             res_str = f"{r['result_m']:.4f} m"
             imp_str = format_imperial(r["result_m"])
-            # Station glyph: ● confirmed (green), ◐ draft (yellow), ◯ no station (dim)
-            sid = r["station_id"]
-            status = r["station_status"]
+            # Setup glyph: blank for singletons (no group, no status), ◐ draft
+            # (yellow), ● confirmed (green). Singletons have no draft/confirmed
+            # lifecycle — they're just lone shots.
+            sid = r["setup_id"]
+            status = r["setup_status"]
             if sid is None:
-                glyph = Text("◯", style="dim")
-                sta_col = Text("—", style="dim")
+                glyph = Text(" ")
+                set_col = Text("")
             elif status == "confirmed":
                 glyph = Text("●", style="bold green")
-                sta_col = Text(f"…{sid % 1000:03d}", style="green")
+                set_col = Text(f"…{sid % 1000:03d}", style="green")
             else:
                 glyph = Text("◐", style="bold yellow")
-                sta_col = Text(f"…{sid % 1000:03d}", style="yellow")
-            label_text = r["station_label"] or ""
+                set_col = Text(f"…{sid % 1000:03d}", style="yellow")
+            label_text = r["setup_label"] or ""
             label_style = "green" if status == "confirmed" else "yellow"
             label_cell = Text(label_text, style=label_style if label_text else "")
             res_cell = Text(res_str)
@@ -338,7 +341,7 @@ class GlmApp(App):
                 imp_cell.stylize("strike dim")
                 if label_text:
                     label_cell.stylize("strike dim")
-            table.add_row(glyph, ts, res_cell, imp_cell, sta_col, label_cell)
+            table.add_row(glyph, ts, res_cell, imp_cell, set_col, label_cell)
 
     # Textual DataTable has no insert-at-top API. For ~50 rows the cheapest
     # correct way to keep newest-first is to clear and re-query the store on
@@ -413,21 +416,24 @@ class GlmApp(App):
                 # Update warning flags from heartbeats
                 self.has_warnings = m.batt_warning or m.temp_warning
                 continue
-            # Station tracking
-            events = self.station.feed(m.meas_id, now_ms)
+            # Setup tracking
+            events = self.setup.feed(m.meas_id, now_ms)
             for ev in events:
-                if isinstance(ev, StationClosed) and len(ev.member_meas_ids) > 1:
-                    self._handle_station_closed(ev)
-            self._station_open_at_ts_ms = now_ms
-            self._reschedule_station_close()
-            sid = self.station._open_id
+                if isinstance(ev, SetupClosed):
+                    if len(ev.member_meas_ids) > 1:
+                        self._handle_setup_closed(ev)
+                    else:
+                        self._handle_setup_singleton(ev)
+            self._setup_open_at_ts_ms = now_ms
+            self._reschedule_setup_close()
+            sid = self.setup._open_id
             if self.device_address:
                 self.store.insert(
                     self.device_address, m,
                     offset_in=self.offset_in,
                     location=self.location,
                     site_name=self.site_name,
-                    station_id=sid,
+                    setup_id=sid,
                 )
             if self.err_tracker is not None and self.device_address:
                 self.err_tracker.on_good(m.meas_id, self.device_address, now_ms)
@@ -435,59 +441,72 @@ class GlmApp(App):
             self.last_measurement = m
             self._reload_history()
 
-    # -- station close timer + countdown ------------------------------------
+    # -- setup close timer + countdown --------------------------------------
 
-    def _handle_station_closed(self, ev: StationClosed) -> None:
-        self._last_closed_station = ev.station_id
-        self.station_status = (
-            f"Station of {len(ev.member_meas_ids)} ready to review (l)"
+    def _handle_setup_closed(self, ev: SetupClosed) -> None:
+        self._last_closed_setup = ev.setup_id
+        self.setup_status = (
+            f"Setup of {len(ev.member_meas_ids)} ready to review (l)"
         )
         if self.client is not None:
             asyncio.create_task(feedback.beep(self.client))
-        self._stop_station_countdown()
+        self._stop_setup_countdown()
 
-    def _reschedule_station_close(self) -> None:
+    def _handle_setup_singleton(self, ev: SetupClosed) -> None:
+        # One-shot — strip its setup_id so it reverts to a plain measurement.
+        # Singletons have no draft/confirmed lifecycle.
+        self.store.clear_setup(ev.setup_id)
+        self._stop_setup_countdown()
+        self.setup_status = ""
+        self._reload_history()
+
+    def _reschedule_setup_close(self) -> None:
         # Cancel any pending close timer; arm a new one for the full idle window.
-        if self._station_close_timer is not None:
-            self._station_close_timer.stop()
-        self._station_close_timer = self.set_timer(
-            self.station_idle_s, self._on_station_idle_expired
+        if self._setup_close_timer is not None:
+            self._setup_close_timer.stop()
+        self._setup_close_timer = self.set_timer(
+            self.setup_idle_s, self._on_setup_idle_expired
         )
-        self._start_station_countdown()
+        self._start_setup_countdown()
 
-    def _on_station_idle_expired(self) -> None:
-        if not self.station.is_open:
+    def _on_setup_idle_expired(self) -> None:
+        if not self.setup.is_open:
             return
-        ev = self.station.force_close()
-        if ev is not None and len(ev.member_meas_ids) > 1:
-            self._handle_station_closed(ev)
-        elif ev is not None and len(ev.member_meas_ids) == 1:
-            # Single-shot station — silently close, no review prompt
-            self._stop_station_countdown()
-
-    def _start_station_countdown(self) -> None:
-        if self._station_countdown_timer is not None:
-            self._station_countdown_timer.stop()
-        self._station_countdown_timer = self.set_interval(
-            1.0, self._tick_station_countdown
-        )
-        self._tick_station_countdown()
-
-    def _tick_station_countdown(self) -> None:
-        if not self.station.is_open or self._station_open_at_ts_ms is None:
-            self._stop_station_countdown()
+        ev = self.setup.force_close()
+        if ev is None:
             return
-        elapsed_s = (int(datetime.now().timestamp() * 1000) - self._station_open_at_ts_ms) / 1000.0
-        remaining = max(0, int(self.station_idle_s - elapsed_s))
-        n = self.station.open_count
-        self.station_status = (
-            f"Station: {n} member{'s' if n != 1 else ''} · closes in {remaining}s"
+        if len(ev.member_meas_ids) > 1:
+            self._handle_setup_closed(ev)
+        else:
+            self._handle_setup_singleton(ev)
+
+    def _start_setup_countdown(self) -> None:
+        if self._setup_countdown_timer is not None:
+            self._setup_countdown_timer.stop()
+        self._setup_countdown_timer = self.set_interval(
+            1.0, self._tick_setup_countdown
+        )
+        self._tick_setup_countdown()
+
+    def _tick_setup_countdown(self) -> None:
+        if not self.setup.is_open or self._setup_open_at_ts_ms is None:
+            self._stop_setup_countdown()
+            return
+        elapsed_s = (int(datetime.now().timestamp() * 1000) - self._setup_open_at_ts_ms) / 1000.0
+        remaining = max(0, int(self.setup_idle_s - elapsed_s))
+        n = self.setup.open_count
+        if n <= 1:
+            # A lone shot isn't really a setup yet — only show the banner
+            # once a second member arrives.
+            return
+        self.setup_status = (
+            f"Setup: {n} members · closes in {remaining}s"
         )
 
-    def _stop_station_countdown(self) -> None:
-        if self._station_countdown_timer is not None:
-            self._station_countdown_timer.stop()
-            self._station_countdown_timer = None
+    def _stop_setup_countdown(self) -> None:
+        if self._setup_countdown_timer is not None:
+            self._setup_countdown_timer.stop()
+            self._setup_countdown_timer = None
 
     async def _request_settings_after_delay(self, client, delay_s: float) -> None:
         await asyncio.sleep(delay_s)
@@ -660,38 +679,41 @@ class GlmApp(App):
             return
         asyncio.create_task(self._send_get_settings(self.client))
 
-    # -- station + soft-delete actions --------------------------------------
+    # -- setup + soft-delete actions ----------------------------------------
 
-    def action_review_station(self) -> None:
-        sid = self._last_closed_station
+    def action_review_setup(self) -> None:
+        sid = self._last_closed_setup
         if sid is None:
-            # Maybe an open station — close it manually for review
-            close_ev = self.station.force_close()
-            if close_ev is None:
-                self.notify("No station to review yet.", severity="warning")
+            # Maybe an open setup — close it manually for review
+            close_ev = self.setup.force_close()
+            if close_ev is None or len(close_ev.member_meas_ids) <= 1:
+                self.notify("No multi-member setup to review yet.",
+                            severity="warning")
+                if close_ev is not None:
+                    self._handle_setup_singleton(close_ev)
                 return
-            sid = close_ev.station_id
-        members = self.store.station_members(sid)
+            sid = close_ev.setup_id
+        members = self.store.setup_members(sid)
         if not members:
-            self.notify(f"No members for station {sid}.", severity="warning")
+            self.notify(f"No members for setup {sid}.", severity="warning")
             return
 
         def apply_labels(labels: dict[int, str | None], confirmed: bool) -> None:
             if self.device_address is None:
                 return
             for meas_id, label in labels.items():
-                self.store.set_station_label(self.device_address, meas_id, label)
+                self.store.set_setup_label(self.device_address, meas_id, label)
             if confirmed:
-                self.store.confirm_station(sid)
-                self.notify(f"Station {sid} confirmed ({len(labels)} labeled).")
+                self.store.confirm_setup(sid)
+                self.notify(f"Setup {sid} confirmed ({len(labels)} labeled).")
                 if self.client is not None:
                     asyncio.create_task(feedback.beep(self.client))
             else:
-                self.notify(f"Station {sid} saved as draft.")
+                self.notify(f"Setup {sid} saved as draft.")
             self._reload_history()
-            self.station_status = ""
+            self.setup_status = ""
 
-        self.push_screen(StationReviewScreen(sid, members, apply_labels))
+        self.push_screen(SetupReviewScreen(sid, members, apply_labels))
 
     def action_toggle_deleted(self) -> None:
         self.show_deleted = not self.show_deleted
@@ -713,11 +735,11 @@ class GlmApp(App):
 
 def run_tui(offset_in: float = 0.0, catchup: bool = False,
             use_location: bool = True, sites_path=None,
-            station_idle_s: float = 60.0, gestures: bool = True) -> None:
+            setup_idle_s: float = 20.0, gestures: bool = True) -> None:
     store = Store()
     try:
         GlmApp(store=store, offset_in=offset_in, catchup=catchup,
                use_location=use_location, sites_path=sites_path,
-               station_idle_s=station_idle_s, gestures=gestures).run()
+               setup_idle_s=setup_idle_s, gestures=gestures).run()
     finally:
         store.close()

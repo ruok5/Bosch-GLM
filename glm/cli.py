@@ -22,7 +22,7 @@ from .protocol.messages import (
     edc_request_history_item, get_settings_request, set_settings_request,
 )
 from .sites import Site, load_sites, nearest_site
-from .station import StationClosed, StationOpened, StationTracker
+from .setup import SetupClosed, SetupTracker
 from .store import LocationFix, Store
 
 
@@ -170,7 +170,7 @@ async def _resolve_location(use_location: bool,
 async def _run_headless(copy_format: str | None, offset_in: float,
                         store: Store | None, catchup: bool,
                         use_location: bool, sites_path: Path | None,
-                        station_idle_s: float = 60.0,
+                        setup_idle_s: float = 20.0,
                         gestures: bool = True) -> None:
     notice("Looking for your GLM...")
     state: dict = {"address": None, "connected": False,
@@ -182,15 +182,21 @@ async def _run_headless(copy_format: str | None, offset_in: float,
     if sites:
         notice(f"Loaded {len(sites)} site(s) from {sites_path or 'default sites file'}.")
 
-    station = StationTracker(idle_window_ms=int(station_idle_s * 1000))
+    setup = SetupTracker(idle_window_ms=int(setup_idle_s * 1000))
     err_tracker = ErrorErrorTracker(window_ms=3000) if gestures else None
     state["close_task"] = None
 
-    def _on_station_closed(ev) -> None:
-        notice(f"  → station {ev.station_id} closed ({len(ev.member_meas_ids)} members) "
-               f"— review with: python station.py show {ev.station_id}")
+    def _on_setup_closed(ev) -> None:
+        notice(f"  → setup {ev.setup_id} closed ({len(ev.member_meas_ids)} members) "
+               f"— review with: python setup.py show {ev.setup_id}")
         if state["client"] is not None:
             asyncio.create_task(feedback.beep(state["client"]))
+
+    def _on_setup_singleton(ev) -> None:
+        # One-shot — strip the setup_id so the row reverts to a plain
+        # measurement (no draft/confirmed lifecycle for singletons).
+        if store is not None:
+            store.clear_setup(ev.setup_id)
 
     def _schedule_idle_close() -> None:
         old = state.get("close_task")
@@ -199,11 +205,14 @@ async def _run_headless(copy_format: str | None, offset_in: float,
 
         async def _check() -> None:
             try:
-                await asyncio.sleep(station_idle_s + 0.1)
-                if station.is_open:
-                    ev = station.force_close()
-                    if ev is not None and len(ev.member_meas_ids) > 1:
-                        _on_station_closed(ev)
+                await asyncio.sleep(setup_idle_s + 0.1)
+                if setup.is_open:
+                    ev = setup.force_close()
+                    if ev is not None:
+                        if len(ev.member_meas_ids) > 1:
+                            _on_setup_closed(ev)
+                        else:
+                            _on_setup_singleton(ev)
             except asyncio.CancelledError:
                 pass
 
@@ -274,20 +283,24 @@ async def _run_headless(copy_format: str | None, offset_in: float,
         if not m.is_meaningful:
             continue  # laser-on / no-action heartbeat
 
-        # Station tracking — group consecutive shots into one observation
-        events = station.feed(m.meas_id, now_ms)
+        # Setup tracking — group consecutive shots into one observation setup
+        events = setup.feed(m.meas_id, now_ms)
         for ev in events:
-            if isinstance(ev, StationClosed) and len(ev.member_meas_ids) > 1:
-                _on_station_closed(ev)
-        # Arm/reset the idle-close timer so the station closes even if no
+            if isinstance(ev, SetupClosed):
+                if len(ev.member_meas_ids) > 1:
+                    _on_setup_closed(ev)
+                else:
+                    _on_setup_singleton(ev)
+        # Arm/reset the idle-close timer so the setup closes even if no
         # further measurements arrive.
         _schedule_idle_close()
-        # Tag this insert with the open station id (or None if just one shot)
-        sid = station._open_id  # accessing internal: the just-added member belongs here
+        # Tag this insert with the open setup id; if it stays a singleton,
+        # idle-close will strip the id and revert it to a plain measurement.
+        sid = setup._open_id
         if store is not None and state["address"]:
             store.insert(state["address"], m, offset_in=offset_in,
                          location=state["location"], site_name=state["site_name"],
-                         station_id=sid)
+                         setup_id=sid)
         if err_tracker is not None and state["address"]:
             err_tracker.on_good(m.meas_id, state["address"], now_ms)
         _print_measurement(m, copy_format, offset_in)
@@ -1023,8 +1036,8 @@ def tui() -> None:
                         help="don't query macOS Location Services for geotagging")
     parser.add_argument("--sites", metavar="PATH",
                         help="JSON file of named sites for nearest-site matching")
-    parser.add_argument("--station-idle-s", type=float, default=60.0,
-                        help="idle window for station auto-close (default 60s)")
+    parser.add_argument("--setup-idle-s", type=float, default=20.0,
+                        help="idle window for setup auto-close (default 20s)")
     parser.add_argument("--no-gestures", action="store_true",
                         help="disable error-error soft-delete gesture detection")
     args = parser.parse_args()
@@ -1032,7 +1045,7 @@ def tui() -> None:
     from .tui.app import run_tui
     run_tui(offset_in=args.offset, catchup=args.catchup,
             use_location=not args.no_location, sites_path=sites_path,
-            station_idle_s=args.station_idle_s,
+            setup_idle_s=args.setup_idle_s,
             gestures=not args.no_gestures)
 
 
@@ -1057,8 +1070,8 @@ def headless() -> None:
     parser.add_argument("--sites", metavar="PATH",
                         help="JSON file of named sites for nearest-site matching "
                              "(default: ~/Library/Application Support/bosch-glm/sites.json)")
-    parser.add_argument("--station-idle-s", type=float, default=60.0,
-                        help="idle window for station auto-close (default 60s)")
+    parser.add_argument("--setup-idle-s", type=float, default=20.0,
+                        help="idle window for setup auto-close (default 20s)")
     parser.add_argument("--no-gestures", action="store_true",
                         help="disable error-error soft-delete gesture detection")
     parser.add_argument("--log-file", metavar="PATH",
@@ -1087,7 +1100,7 @@ def headless() -> None:
         asyncio.run(_run_headless(
             args.clipboard, args.offset, store, args.catchup,
             use_location=not args.no_location, sites_path=sites_path,
-            station_idle_s=args.station_idle_s,
+            setup_idle_s=args.setup_idle_s,
             gestures=not args.no_gestures,
         ))
     except KeyboardInterrupt:

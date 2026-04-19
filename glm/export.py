@@ -1,5 +1,5 @@
 """Export filtered measurement subsets in CSV / JSON / Markdown formats,
-plus AutoCAD-targeted formats: per-station MLEADER text blocks and
+plus AutoCAD-targeted formats: per-setup MLEADER text blocks and
 attribute-row CSV.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ EXPORT_FIELDS = [
     "result_m", "result_imperial", "comp1_m", "comp2_m",
     "offset_in", "site_name", "latitude", "longitude", "loc_accuracy_m",
     "notes",
-    "station_id", "station_label", "station_status", "deleted_at_iso",
+    "setup_id", "setup_label", "setup_status", "deleted_at_iso",
 ]
 
 
@@ -67,9 +67,9 @@ def _row_to_dict(row) -> dict:
         "longitude": get("longitude"),
         "loc_accuracy_m": get("loc_accuracy_m"),
         "notes": get("notes"),
-        "station_id": get("station_id"),
-        "station_label": get("station_label"),
-        "station_status": get("station_status"),
+        "setup_id": get("setup_id"),
+        "setup_label": get("setup_label"),
+        "setup_status": get("setup_status"),
         "deleted_at_iso": _maybe_iso(get("deleted_at")),
     }
 
@@ -102,49 +102,49 @@ def to_markdown(rows: Iterable[dict], out) -> None:
             f"{r['result_m']:.4f} m",
             r["result_imperial"],
             r.get("site_name") or "",
-            r.get("station_label") or "",
+            r.get("setup_label") or "",
             (r.get("notes") or "").replace("|", "\\|"),
         ]
         out.write("| " + " | ".join(cells) + " |\n")
 
 
-def _group_by_station(rows: Iterable[dict]) -> dict[int, list[dict]]:
+def _group_by_setup(rows: Iterable[dict]) -> dict[int, list[dict]]:
     groups: dict[int, list[dict]] = defaultdict(list)
     for r in rows:
-        sid = r.get("station_id")
+        sid = r.get("setup_id")
         if sid is None:
             continue
         groups[sid].append(r)
-    # Sort each station's members by Z (result_m ascending — bottom to top)
+    # Sort each setup's members by Z (result_m ascending — bottom to top)
     for sid in groups:
         groups[sid].sort(key=lambda r: r["result_m"])
     return dict(groups)
 
 
 def to_mleader(rows: Iterable[dict], out) -> None:
-    """One text block per station for AutoCAD MLEADER paste. Members listed
+    """One text block per setup for AutoCAD MLEADER paste. Members listed
     HIGHEST Z first (matches how vertical sections are drawn in CAD).
-    Stations separated by blank lines so the user can paste them one at a
+    Setups separated by blank lines so the user can paste them one at a
     time.
 
-    Default usage limits to a single station per invocation (the most
-    recent confirmed one, or the one passed via --station) — pasting
-    multi-station output into a single MLEADER is rarely what you want.
-    Use --all-stations to override."""
-    groups = _group_by_station(rows)
+    Default usage limits to a single setup per invocation (the most recent
+    confirmed one, or the one passed via --setup) — pasting multi-setup
+    output into a single MLEADER is rarely what you want.
+    Use --all-setups to override."""
+    groups = _group_by_setup(rows)
     if not groups:
-        out.write("(no stations to export — only confirmed stations are included by default; use --include-drafts)\n")
+        out.write("(no setups to export — only confirmed setups are included by default; use --include-drafts)\n")
         return
     sids = sorted(groups, reverse=True)  # newest first
     for i, sid in enumerate(sids):
         members = groups[sid]
-        # Sort each station's members HIGHEST Z first (descending result_m)
+        # Sort each setup's members HIGHEST Z first (descending result_m)
         # so the visual order matches a CAD section view top-to-bottom.
         members = sorted(members, key=lambda r: r["result_m"], reverse=True)
-        # Use the first member's captured_at as the station header timestamp
+        # Use the first member's captured_at as the setup header timestamp
         first_ts = members[0]["captured_at_iso"][:19].replace("T", " ")
-        out.write(f"Station {first_ts}\n")
-        labels = [m.get("station_label") or "(unlabeled)" for m in members]
+        out.write(f"Setup {first_ts}\n")
+        labels = [m.get("setup_label") or "(unlabeled)" for m in members]
         max_w = max(len(lbl) for lbl in labels) + 1
         for m, lbl in zip(members, labels):
             out.write(f"  {lbl:<{max_w}} {m['result_imperial']}\n")
@@ -164,15 +164,15 @@ _STANDARD_LABEL_TO_TAG = {
 
 
 def to_attribs(rows: Iterable[dict], out) -> None:
-    """One CSV row per station, columns matching AutoCAD block-attribute
+    """One CSV row per setup, columns matching AutoCAD block-attribute
     tags. Pipe entries are split into BOT_PIPE (imperial) and BOT_PIPE_SIZE
     (the size suffix). Custom (non-preset) labels round-trip via the
     `custom_labels_json` column."""
-    groups = _group_by_station(rows)
+    groups = _group_by_setup(rows)
     sids = sorted(groups)  # oldest first for export readability
 
     fieldnames = [
-        "station_id", "captured_at_iso", "site_name",
+        "setup_id", "captured_at_iso", "site_name",
         "latitude", "longitude",
         "BOT_BEAM", "BOT_PURLIN", "BOT_SUBPURLIN", "BOT_FOIL", "BOT_DECK",
         "BOT_PIPE", "BOT_PIPE_SIZE",
@@ -185,7 +185,7 @@ def to_attribs(rows: Iterable[dict], out) -> None:
         members = groups[sid]
         first = members[0]
         row: dict = {
-            "station_id": sid,
+            "setup_id": sid,
             "captured_at_iso": first["captured_at_iso"],
             "site_name": first.get("site_name") or "",
             "latitude": first.get("latitude"),
@@ -196,7 +196,7 @@ def to_attribs(rows: Iterable[dict], out) -> None:
         }
         custom: dict[str, str] = {}
         for m in members:
-            label = m.get("station_label") or ""
+            label = m.get("setup_label") or ""
             if not label:
                 continue
             tag = _STANDARD_LABEL_TO_TAG.get(label)
@@ -226,7 +226,7 @@ def export_main() -> None:
     from . import __version__
     parser = argparse.ArgumentParser(
         description="Export measurements from the local SQLite store.",
-        epilog="Default excludes soft-deleted rows AND draft stations. "
+        epilog="Default excludes soft-deleted rows AND draft setups. "
                "Use --include-deleted / --include-drafts to widen.",
     )
     parser.add_argument("--version", "-V", action="version",
@@ -238,15 +238,15 @@ def export_main() -> None:
                         help="ISO date or timestamp; upper bound (inclusive)")
     parser.add_argument("--site", metavar="NAME", help="match this site name exactly")
     parser.add_argument("--device", metavar="ADDR", help="match this BLE device address exactly")
-    parser.add_argument("--station", type=int, metavar="ID", help="match this station id only")
+    parser.add_argument("--setup", type=int, metavar="ID", help="match this setup id only")
     parser.add_argument("--limit", type=int, metavar="N",
                         help="cap number of rows (newest first)")
     parser.add_argument("--include-deleted", action="store_true",
                         help="include soft-deleted measurements")
     parser.add_argument("--include-drafts", action="store_true",
-                        help="include rows from draft (unconfirmed) stations")
-    parser.add_argument("--all-stations", action="store_true",
-                        help="for mleader format: emit ALL stations (default "
+                        help="include rows from draft (unconfirmed) setups")
+    parser.add_argument("--all-setups", action="store_true",
+                        help="for mleader format: emit ALL setups (default "
                              "is just the most recent matching one)")
     parser.add_argument("-o", "--output", metavar="PATH",
                         help="write to PATH instead of stdout")
@@ -259,19 +259,19 @@ def export_main() -> None:
         rows = store.query(
             since_ms=since_ms, until_ms=until_ms,
             site=args.site, device_address=args.device,
-            station_id=args.station, limit=args.limit,
+            setup_id=args.setup, limit=args.limit,
             include_deleted=args.include_deleted,
             include_drafts=args.include_drafts,
         )
         dicts = [_row_to_dict(r) for r in rows]
         dicts.reverse()  # oldest-first reads better in exports
-        # MLEADER default: limit to the single most recent station unless
+        # MLEADER default: limit to the single most recent setup unless
         # the user explicitly asked for all or pinned a specific one.
-        if args.format == "mleader" and not args.all_stations and args.station is None:
-            station_ids = [d["station_id"] for d in dicts if d.get("station_id")]
-            if station_ids:
-                latest = max(station_ids)
-                dicts = [d for d in dicts if d.get("station_id") == latest]
+        if args.format == "mleader" and not args.all_setups and args.setup is None:
+            setup_ids = [d["setup_id"] for d in dicts if d.get("setup_id")]
+            if setup_ids:
+                latest = max(setup_ids)
+                dicts = [d for d in dicts if d.get("setup_id") == latest]
         out_stream = (open(args.output, "w") if args.output else sys.stdout)
         try:
             FORMATS[args.format](dicts, out_stream)

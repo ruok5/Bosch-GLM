@@ -72,57 +72,67 @@ def test_undelete_no_op_when_not_deleted(store):
     assert store.undelete("AA", 1) is False
 
 
-def test_set_station_label(store):
+def test_set_setup_label(store):
     store.insert("AA", _m(1))
-    assert store.set_station_label("AA", 1, "bottom-of-beam") is True
+    assert store.set_setup_label("AA", 1, "bottom-of-beam") is True
     rows = store.query()
-    assert rows[0]["station_label"] == "bottom-of-beam"
+    assert rows[0]["setup_label"] == "bottom-of-beam"
 
 
-def test_confirm_station_marks_all_members(store):
+def test_confirm_setup_marks_all_members(store):
     sid = 1000
-    store.insert("AA", _m(1), station_id=sid)
-    store.insert("AA", _m(2), station_id=sid)
-    store.insert("AA", _m(3), station_id=sid)
-    assert store.confirm_station(sid) == 3
-    rows = store.query(station_id=sid)
-    assert all(r["station_status"] == "confirmed" for r in rows)
+    store.insert("AA", _m(1), setup_id=sid)
+    store.insert("AA", _m(2), setup_id=sid)
+    store.insert("AA", _m(3), setup_id=sid)
+    assert store.confirm_setup(sid) == 3
+    rows = store.query(setup_id=sid)
+    assert all(r["setup_status"] == "confirmed" for r in rows)
 
 
 def test_query_excludes_drafts_when_asked(store):
     sid = 1000
-    store.insert("AA", _m(1), station_id=sid)
-    store.insert("AA", _m(2), station_id=sid)
-    store.insert("AA", _m(3))  # not in any station
+    store.insert("AA", _m(1), setup_id=sid)
+    store.insert("AA", _m(2), setup_id=sid)
+    store.insert("AA", _m(3))  # not in any setup
     # Default include_drafts=True returns all 3
     assert len(store.query()) == 3
-    # include_drafts=False keeps the standalone row but excludes the draft station
+    # include_drafts=False keeps the standalone row but excludes the draft setup
     rows = store.query(include_drafts=False)
     ids = sorted(r["meas_id"] for r in rows)
     assert ids == [3]
-    # After confirming, the station rows show up too
-    store.confirm_station(sid)
+    # After confirming, the setup rows show up too
+    store.confirm_setup(sid)
     assert len(store.query(include_drafts=False)) == 3
 
 
-def test_recent_stations_aggregates(store):
+def test_recent_setups_aggregates(store):
     import time
-    store.insert("AA", _m(1, result=1.1), station_id=1000); time.sleep(0.005)
-    store.insert("AA", _m(2, result=1.2), station_id=1000); time.sleep(0.005)
-    store.insert("AA", _m(3, result=1.3), station_id=2000)
-    rows = store.recent_stations()
+    store.insert("AA", _m(1, result=1.1), setup_id=1000); time.sleep(0.005)
+    store.insert("AA", _m(2, result=1.2), setup_id=1000); time.sleep(0.005)
+    store.insert("AA", _m(3, result=1.3), setup_id=2000)
+    rows = store.recent_setups()
     assert len(rows) == 2
     # newest-first by first_at
-    assert rows[0]["station_id"] == 2000
-    assert rows[1]["station_id"] == 1000
+    assert rows[0]["setup_id"] == 2000
+    assert rows[1]["setup_id"] == 1000
     assert rows[0]["member_count"] == 1
     assert rows[1]["member_count"] == 2
 
 
-def test_station_members_sorted_by_z(store):
+def test_clear_setup_strips_id_and_status(store):
     sid = 1000
-    store.insert("AA", _m(1, result=2.5), station_id=sid)
-    store.insert("AA", _m(2, result=1.0), station_id=sid)
-    store.insert("AA", _m(3, result=3.0), station_id=sid)
-    members = store.station_members(sid)
+    store.insert("AA", _m(1), setup_id=sid)
+    store.confirm_setup(sid)
+    assert store.clear_setup(sid) == 1
+    rows = store.query()
+    assert rows[0]["setup_id"] is None
+    assert rows[0]["setup_status"] is None
+
+
+def test_setup_members_sorted_by_z(store):
+    sid = 1000
+    store.insert("AA", _m(1, result=2.5), setup_id=sid)
+    store.insert("AA", _m(2, result=1.0), setup_id=sid)
+    store.insert("AA", _m(3, result=3.0), setup_id=sid)
+    members = store.setup_members(sid)
     assert [m["result_m"] for m in members] == [1.0, 2.5, 3.0]
