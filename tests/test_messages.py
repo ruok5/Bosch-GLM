@@ -1,5 +1,6 @@
 import struct
 
+from glm.format import format_imperial_quarter
 from glm.protocol.frame import encode
 from glm.protocol.messages import (
     DeviceSettings, EDCMeasurement, UNIT_FT_IN_FRACT, BACKLIGHT_AUTO,
@@ -35,6 +36,19 @@ def test_decode_edc_measurement_single_distance():
     assert abs(m.result - 1.234) < 1e-6
     assert abs(m.comp1 - 1.234) < 1e-6
     assert m.comp2 == 0.0
+
+
+def test_quarter_inch_rounding():
+    # 1.0 m = 39.37 in ≈ 3'-3 3/8" → rounds to 3'-3 1/4" (closest quarter)
+    assert format_imperial_quarter(1.0) == "3'-3 1/4\""
+    # 0.5 m = 19.685 in ≈ 1'-7 11/16" → rounds to 1'-7 3/4"
+    assert format_imperial_quarter(0.5) == "1'-7 3/4\""
+    # Whole-inch boundary: 0.0254 m = 1.0 in
+    assert format_imperial_quarter(0.0254) == "0'-1\""
+    # Half-inch: 0.0127 m = 0.5 in
+    assert format_imperial_quarter(0.0127) == "0'-0 1/2\""
+    # Zero
+    assert format_imperial_quarter(0.0) == "0'-0\""
 
 
 def test_decode_edc_measurement_with_warnings():

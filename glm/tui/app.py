@@ -19,7 +19,7 @@ from ..ble import CHAR_UUID, stream_frames
 from .. import feedback
 from ..format import (
     IN_PER_M, copy_to_clipboard, displayed_inches, format_imperial,
-    fractional_inches, render_big,
+    format_imperial_quarter, fractional_inches, render_big,
 )
 from ..gestures import ErrorErrorTracker
 from ..protocol.constants import FrameType
@@ -264,11 +264,13 @@ class GlmApp(App):
         big = render_big(imperial)
         ts = datetime.now().strftime("%H:%M:%S")
         if self.offset_in:
-            small = (f"[{ts}]  {m.result:.4f} m  ·  raw {m.result*IN_PER_M:.2f}\""
-                     f"  ·  adj {adj_m*IN_PER_M:.2f}\"  ·  measID {m.meas_id}")
+            small = (f"[{ts}]  {m.result:.4f} m  ·  raw {format_imperial_quarter(m.result)}"
+                     f"  →  adj {format_imperial_quarter(adj_m)}"
+                     f"  ·  measID {m.meas_id}")
             color = "yellow"
         else:
-            small = f"[{ts}]  {m.result:.4f} m  ·  {adj_m * IN_PER_M:.2f}\"  ·  measID {m.meas_id}"
+            small = (f"[{ts}]  {m.result:.4f} m  ·  "
+                     f"{format_imperial_quarter(adj_m)}  ·  measID {m.meas_id}")
         panel = self.query_one("#reading", ReadingPanel)
         panel.update(f"[bold {color}]{big}[/bold {color}]\n[dim]{small}[/dim]")
 

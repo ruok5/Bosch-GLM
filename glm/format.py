@@ -8,10 +8,22 @@ IN_PER_M = 39.3700787
 
 
 def format_imperial(meters: float) -> str:
+    """Feet-inches rounded to the nearest 1/2 inch."""
     half_inches = round(meters * IN_PER_M * 2)
     feet, rem = divmod(half_inches, 24)
     whole_in, frac = divmod(rem, 2)
     return f"{feet}'-{whole_in} 1/2\"" if frac else f"{feet}'-{whole_in}\""
+
+
+_QUARTER_FRAC = {0: "", 1: " 1/4", 2: " 1/2", 3: " 3/4"}
+
+
+def format_imperial_quarter(meters: float) -> str:
+    """Feet-inches rounded to the nearest 1/4 inch."""
+    quarter_inches = round(meters * IN_PER_M * 4)
+    feet, rem = divmod(quarter_inches, 48)
+    whole_in, frac = divmod(rem, 4)
+    return f"{feet}'-{whole_in}{_QUARTER_FRAC[frac]}\""
 
 
 def displayed_inches(meters: float) -> float:
