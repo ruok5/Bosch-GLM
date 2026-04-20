@@ -27,8 +27,10 @@ Tested on a Bosch GLM165-27C6 on macOS. Should work on any GLM in the
 - Auto-discovers the GLM by BLE service UUID — **no MAC address
   configuration required**
 - Reconnect loop with backoff; survives the rangefinder going to sleep
-- Big-text terminal display of each reading; imperial output rounded
-  to the nearest ½" with zero-feet/inches always shown (`0'-3 1/2"`)
+- Big-text terminal display of each reading; imperial output rounded to a
+  user-selectable precision (1", ½", ¼", or ⅛") with zero-feet/inches always
+  shown (`0'-3 1/2"`). The TUI `P` key cycles precision and the choice
+  persists in `prefs.json`.
 - `--clipboard` to copy each measurement via `pbcopy`
 - `--offset` for a static correction (tape-hook or jig offsets)
 - **Persistent SQLite log** of every measurement, deduped by the
@@ -167,6 +169,13 @@ Key bindings:
 | `o` | Set offset (opens input prompt) |
 | `r` | Reload history table from store |
 | `s` | Re-fetch device settings |
+| `P` | Cycle display precision (1" → ½" → ¼" → ⅛") |
+| `T` | Set setup auto-close timeout (seconds) |
+
+The right-hand settings panel collapses automatically when the terminal is
+narrower than 100 columns. TUI preferences (precision, setup timeout,
+collapse override) live in
+`~/Library/Application Support/bosch-glm/prefs.json`.
 
 ### Settings get / set
 

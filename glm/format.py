@@ -16,6 +16,10 @@ def format_imperial(meters: float) -> str:
 
 
 _QUARTER_FRAC = {0: "", 1: " 1/4", 2: " 1/2", 3: " 3/4"}
+_EIGHTH_FRAC = {
+    0: "", 1: " 1/8", 2: " 1/4", 3: " 3/8",
+    4: " 1/2", 5: " 5/8", 6: " 3/4", 7: " 7/8",
+}
 
 
 def format_imperial_quarter(meters: float) -> str:
@@ -24,6 +28,38 @@ def format_imperial_quarter(meters: float) -> str:
     feet, rem = divmod(quarter_inches, 48)
     whole_in, frac = divmod(rem, 4)
     return f"{feet}'-{whole_in}{_QUARTER_FRAC[frac]}\""
+
+
+def format_imperial_eighth(meters: float) -> str:
+    """Feet-inches rounded to the nearest 1/8 inch."""
+    eighth_inches = round(meters * IN_PER_M * 8)
+    feet, rem = divmod(eighth_inches, 96)
+    whole_in, frac = divmod(rem, 8)
+    return f"{feet}'-{whole_in}{_EIGHTH_FRAC[frac]}\""
+
+
+def format_imperial_inch(meters: float) -> str:
+    """Feet-inches rounded to the nearest whole inch."""
+    inches = round(meters * IN_PER_M)
+    feet, whole_in = divmod(inches, 12)
+    return f"{feet}'-{whole_in}\""
+
+
+# Dispatch table keyed on the precision strings used in Preferences.
+# Matches PRECISION_VALUES in glm.prefs — a user preference change is just
+# a different entry in this dict with no other code paths to update.
+_BY_PRECISION = {
+    "1":   format_imperial_inch,
+    "1/2": format_imperial,
+    "1/4": format_imperial_quarter,
+    "1/8": format_imperial_eighth,
+}
+
+
+def format_imperial_at(meters: float, precision: str) -> str:
+    """Format `meters` as a feet-inches string at the given precision.
+    Precision is one of "1", "1/2", "1/4", "1/8". Unknown → 1/2 (default)."""
+    return _BY_PRECISION.get(precision, format_imperial)(meters)
 
 
 def displayed_inches(meters: float) -> float:
