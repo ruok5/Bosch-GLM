@@ -40,7 +40,12 @@ logger = logging.getLogger(__name__)
 
 HISTORY_LIMIT = 50
 ERROR_DISPLAY_S = 4.0
-CATCHUP_STARTUP_DELAY_S = 1.5
+# Post-connect timeline (T=0 at on_connect). stream_frames itself writes
+# the autosync-enable at roughly T+1s, so our own writes need to land
+# clearly before or after that to avoid the BLE stack swallowing one of
+# them. The empirical sweet spot: settings at T+2.5, catchup at T+4.0.
+SETTINGS_REQUEST_DELAY_S = 2.5
+CATCHUP_STARTUP_DELAY_S = 4.0
 CATCHUP_RESPONSE_TIMEOUT_S = 1.5
 MAX_LIST_INDEX = 63
 
@@ -376,7 +381,8 @@ class GlmApp(App):
             short = short.split("-")[0] if "-" in short else short
             self.device_name = short
             # Kick off settings request shortly after connection settles.
-            asyncio.create_task(self._request_settings_after_delay(client, 1.0))
+            asyncio.create_task(
+                self._request_settings_after_delay(client, SETTINGS_REQUEST_DELAY_S))
             # Geolocation lookup
             if self.use_location:
                 asyncio.create_task(self._refresh_location())
@@ -394,6 +400,8 @@ class GlmApp(App):
 
         async for frame in stream_frames(on_connect=on_connect,
                                           on_disconnect=on_disconnect):
+            logger.debug("ble_loop rx: type=%s cmd=%#x len=%d status=%s",
+                         frame.type, frame.cmd, len(frame.payload), frame.status)
             # Responses are dispatched by payload size — settings is 11 bytes,
             # EDC measurement is 16. The wire protocol drops the cmd byte for
             # responses, so size is the only discriminator we have.
@@ -407,12 +415,22 @@ class GlmApp(App):
                 elif n >= 16:
                     m = EDCMeasurement.from_payload(frame.payload)
                     if catchup_queue is not None:
+                        logger.debug("ble_loop: routing RESPONSE (n=%d) to catchup_queue "
+                                     "measID=%d devMode=%d result=%.4f",
+                                     n, m.meas_id, m.dev_mode, m.result)
                         catchup_queue.put_nowait(m)
+                    else:
+                        logger.debug("ble_loop: dropping RESPONSE (n=%d) — no catchup_queue", n)
+                else:
+                    logger.debug("ble_loop: dropping RESPONSE (n=%d, neither settings nor EDC)", n)
                 continue
             # Live EDC notifications (REQUEST type, cmd 0x55)
             if (frame.type != FrameType.REQUEST
                     or frame.cmd != CMD_EDC
                     or len(frame.payload) < 16):
+                logger.debug("ble_loop: skipping non-live-EDC frame "
+                             "(type=%s cmd=%#x len=%d)",
+                             frame.type, frame.cmd, len(frame.payload))
                 continue
             m = EDCMeasurement.from_payload(frame.payload)
             now_ms = int(datetime.now().timestamp() * 1000)
@@ -558,41 +576,82 @@ class GlmApp(App):
             logger.debug("settings request failed: %s", e)
 
     async def _catchup(self, client, queue: asyncio.Queue[EDCMeasurement]) -> None:
+        logger.info("catchup: scheduled, sleeping %.1fs to let autosync settle",
+                    CATCHUP_STARTUP_DELAY_S)
         await asyncio.sleep(CATCHUP_STARTUP_DELAY_S)
         self.catchup_status = "Catchup: probing device history…"
+        logger.info("catchup: starting probe of listIndex 1..%d, address=%s",
+                    MAX_LIST_INDEX, self.device_address)
         scanned = 0
         recovered = 0
-        for list_idx in range(1, MAX_LIST_INDEX + 1):
-            # Drain any stale frames
-            while not queue.empty():
-                queue.get_nowait()
-            try:
-                await client.write_gatt_char(
-                    CHAR_UUID, encode(edc_request_history_item(list_idx)), True)
-            except Exception as e:
-                logger.warning("catchup write failed: %s", e)
-                break
-            try:
-                m = await asyncio.wait_for(queue.get(), timeout=CATCHUP_RESPONSE_TIMEOUT_S)
-            except asyncio.TimeoutError:
-                break
-            scanned += 1
-            if not m.is_meaningful:
-                break
-            if self.device_address and self.store.insert_history(
+        try:
+            for list_idx in range(1, MAX_LIST_INDEX + 1):
+                drained = 0
+                while not queue.empty():
+                    queue.get_nowait()
+                    drained += 1
+                if drained:
+                    logger.debug("catchup: drained %d stale frame(s) before listIndex=%d",
+                                 drained, list_idx)
+                request_bytes = encode(edc_request_history_item(list_idx))
+                logger.debug("catchup: tx listIndex=%d  bytes=%s",
+                             list_idx, request_bytes.hex())
+                try:
+                    await client.write_gatt_char(CHAR_UUID, request_bytes, True)
+                except Exception as e:
+                    logger.warning("catchup: write failed at listIndex %d: %s",
+                                   list_idx, e)
+                    break
+                try:
+                    m = await asyncio.wait_for(
+                        queue.get(), timeout=CATCHUP_RESPONSE_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    logger.info("catchup: timeout waiting for listIndex %d "
+                                "(after %.1fs) — stopping",
+                                list_idx, CATCHUP_RESPONSE_TIMEOUT_S)
+                    break
+                logger.debug(
+                    "catchup: rx listIndex=%d  measID=%d devMode=%d refEdge=%d "
+                    "result=%.4f comp1=%.4f comp2=%.4f",
+                    list_idx, m.meas_id, m.dev_mode, m.ref_edge,
+                    m.result, m.comp1, m.comp2,
+                )
+                scanned += 1
+                if not m.is_meaningful:
+                    logger.info("catchup: empty/error at listIndex %d "
+                                "(devMode=%d, result=%.4f) — stopping",
+                                list_idx, m.dev_mode, m.result)
+                    break
+                inserted = bool(self.device_address) and self.store.insert_history(
                     self.device_address, m,
                     offset_in=self.offset_in,
                     location=self.location,
-                    site_name=self.site_name):
-                recovered += 1
-                # Visually replay in magenta and adopt as last_measurement so
-                # `c` copies what's currently shown on screen.
-                self.last_measurement = m
-                self._render_measurement(m, color="magenta")
-                self._reload_history()
-            self.catchup_status = (
-                f"Catchup: scanned {scanned}/{MAX_LIST_INDEX}, recovered {recovered}…"
-            )
+                    site_name=self.site_name,
+                )
+                if inserted:
+                    recovered += 1
+                    logger.info("catchup: recovered new measurement at listIndex %d "
+                                "(result=%.4f m)", list_idx, m.result)
+                    # Visually replay in magenta and adopt as last_measurement so
+                    # `c` copies what's currently shown on screen.
+                    self.last_measurement = m
+                    self._render_measurement(m, color="magenta")
+                    self._reload_history()
+                else:
+                    logger.debug("catchup: dup (value already in store) at listIndex %d",
+                                 list_idx)
+                self.catchup_status = (
+                    f"Catchup: scanned {scanned}/{MAX_LIST_INDEX}, recovered {recovered}…"
+                )
+        except asyncio.CancelledError:
+            logger.info("catchup: cancelled at listIndex=%d, scanned=%d, recovered=%d",
+                        list_idx, scanned, recovered)
+            raise
+        except Exception:
+            logger.exception("catchup: unexpected error, scanned=%d recovered=%d",
+                             scanned, recovered)
+            raise
+        logger.info("catchup: done, scanned=%d recovered=%d", scanned, recovered)
         self.catchup_status = (
             f"Catchup done: scanned {scanned}, recovered {recovered}."
         )
