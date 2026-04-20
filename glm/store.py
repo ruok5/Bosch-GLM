@@ -219,6 +219,20 @@ class Store:
         self.conn.commit()
         return cur.rowcount
 
+    def break_setup(self, setup_id: int) -> int:
+        """Break a multi-member setup back into singletons. Clears setup_id,
+        setup_label, and setup_status so each row becomes an ungrouped
+        measurement. Intended for user-initiated undo of accidental
+        groupings (#9 review-modal escape hatch)."""
+        cur = self.conn.execute(
+            "UPDATE measurements SET setup_id = NULL, "
+            "setup_label = NULL, setup_status = NULL "
+            "WHERE setup_id = ?",
+            (setup_id,),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def setup_members(self, setup_id: int) -> list[sqlite3.Row]:
         return list(self.conn.execute(
             "SELECT * FROM measurements WHERE setup_id = ? "

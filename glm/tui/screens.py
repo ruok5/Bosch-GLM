@@ -240,19 +240,23 @@ class SetupReviewScreen(ModalScreen[bool]):
     """
 
     BINDINGS = [
-        # priority=True so child widgets don't eat Enter
+        # priority=True so the hidden DataTable / mounted Input don't eat keys
         Binding("enter", "confirm", "Confirm", priority=True),
         Binding("escape", "cancel", "Cancel"),
         Binding("s", "save_draft", "Save draft"),
-        Binding("j,down", "next", "Next slot"),
-        Binding("k,up", "prev", "Prev slot"),
-        Binding("J,shift+down", "push_down", "Push down"),
-        Binding("K,shift+up", "push_up", "Push up"),
+        Binding("j,down", "next", "Next slot", priority=True),
+        Binding("k,up", "prev", "Prev slot", priority=True),
+        # Textual key names are lowercase; capital letters arrive as shift+<key>.
+        # The old "J" / "K" literals matched nothing in the key event system, so
+        # push/pull never fired (#11).
+        Binding("shift+j,shift+down", "push_down", "Push down", priority=True),
+        Binding("shift+k,shift+up", "push_up", "Push up", priority=True),
         Binding("f", "toggle_foil", "Foil↔Sub"),
         Binding("p", "pick_pipe_size", "Pipe size"),
         Binding("x", "clear", "Clear slot"),
         Binding("t", "custom", "Custom"),
         Binding("v", "toggle_view", "Toggle view"),
+        Binding("b", "break_setup", "Break→singletons"),
     ]
 
     DEFAULT_CSS = """
@@ -272,7 +276,8 @@ class SetupReviewScreen(ModalScreen[bool]):
     """
 
     def __init__(self, setup_id: int, members: list,
-                 on_apply: Callable[[dict[int, str | None], bool], None]) -> None:
+                 on_apply: Callable[[dict[int, str | None], bool], None],
+                 on_break: Callable[[], None] | None = None) -> None:
         """`members` is a list of sqlite3.Row from store.setup_members(); the
         store returns ascending Z. We display DESCENDING (highest Z at top)
         because that matches how vertical sections are drawn in CAD.
@@ -282,6 +287,7 @@ class SetupReviewScreen(ModalScreen[bool]):
         # Reverse so highest Z is members[0]
         self.members = list(reversed(list(members)))
         self.on_apply = on_apply
+        self.on_break = on_break
 
         # Slot assignment: slot index → meas_id (or None for empty).
         # Default fill: top-down by Z, no gaps. Members beyond N_SLOTS
@@ -519,6 +525,114 @@ class SetupReviewScreen(ModalScreen[bool]):
     def action_cancel(self) -> None:
         self.dismiss(False)
 
+    def action_break_setup(self) -> None:
+        """Ungroup this setup back into singletons. Issue #9 escape hatch:
+        the auto-grouper sometimes lumps unrelated shots into one setup
+        (e.g. the user was mid-measurement when the idle window ticked).
+        A confirm modal guards against fat-fingers; on accept we invoke
+        `on_break` (if provided) and dismiss."""
+        if self.on_break is None:
+            self.notify("Break-setup not available here.", severity="warning")
+            return
+
+        def _done(ack: bool | None) -> None:
+            if not ack:
+                return
+            if self.on_break is not None:
+                self.on_break()
+            self.dismiss(False)
+
+        self.app.push_screen(
+            ConfirmModal(f"Break setup {self.setup_id} back into "
+                         f"{len(self.members)} singleton(s)?"),
+            _done,
+        )
+
+
+class ConfirmModal(ModalScreen[bool]):
+    """Y/N confirm dialog. Dismisses True on `y`/`enter`, False on `n`/`esc`."""
+
+    BINDINGS = [
+        Binding("y,enter", "ack", "Yes", priority=True),
+        Binding("n,escape", "nack", "No", priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    ConfirmModal { align: center middle; }
+    #confirm-box {
+        width: auto;
+        height: auto;
+        border: thick $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    """
+
+    def __init__(self, prompt: str) -> None:
+        super().__init__()
+        self.prompt = prompt
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Static(self.prompt)
+            yield Static(
+                "[bold green]y/Enter[/bold green]=yes  "
+                "[bold red]n/Esc[/bold red]=no"
+            )
+
+    def action_ack(self) -> None:
+        self.dismiss(True)
+
+    def action_nack(self) -> None:
+        self.dismiss(False)
+
+
+class SingletonLabelScreen(ModalScreen[str | None]):
+    """Single-line label entry for an ungrouped measurement (#9). Returns the
+    new label on save, empty string to clear an existing label, or None on
+    cancel."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    SingletonLabelScreen { align: center middle; }
+    #label-box {
+        width: 60;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #label-input { margin-top: 1; }
+    """
+
+    def __init__(self, meas_id: int, existing: str | None,
+                 value_imperial: str) -> None:
+        super().__init__()
+        self.meas_id = meas_id
+        self.existing = existing or ""
+        self.value_imperial = value_imperial
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="label-box"):
+            yield Static(f"[bold]Label measurement #{self.meas_id}[/bold]  "
+                         f"— {self.value_imperial}")
+            yield Static("[dim]Enter = save · empty = clear · Esc = cancel[/dim]")
+            yield Input(value=self.existing, placeholder="label", id="label-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#label-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "label-input":
+            return
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
 
 class HelpScreen(ModalScreen[None]):
     """One-screen legend for the icons, colors, and key bindings."""
@@ -550,15 +664,23 @@ class HelpScreen(ModalScreen[None]):
         "  [bold green]●[/bold green]   [green]confirmed setup[/green] — reviewed and labeled\n"
         "\n"
         "[bold]Label color[/bold]\n"
-        "  [yellow]yellow[/yellow] = draft (you can still change it via [bold]l[/bold])\n"
-        "  [green]green[/green]  = confirmed (locked in for export)\n"
+        "  [yellow]yellow[/yellow] = draft setup\n"
+        "  [green]green[/green]  = confirmed setup (locked in for export)\n"
+        "  [cyan]cyan[/cyan]   = singleton label (free-form)\n"
         "  [strike dim]strikethrough[/strike dim] = soft-deleted (hidden by default)\n"
         "\n"
         "[bold]Keys[/bold]\n"
         "  [bold]q[/bold] quit       [bold]c[/bold] copy last      [bold]o[/bold] set offset\n"
-        "  [bold]r[/bold] refresh    [bold]s[/bold] sync settings  [bold]l[/bold] review setup\n"
+        "  [bold]r[/bold] refresh    [bold]s[/bold] sync settings\n"
+        "  [bold]l[/bold] label/review the highlighted row (any setup; singletons too)\n"
         "  [bold]D[/bold] show/hide deleted  [bold]U[/bold] undelete last\n"
         "  [bold]?[/bold] this help\n"
+        "\n"
+        "[bold]In the setup-review modal[/bold]\n"
+        "  [bold]j/k[/bold] move cursor · [bold]J/K[/bold] (shift+j/k) push/pull\n"
+        "  [bold]f[/bold] foil↔sub · [bold]p[/bold] pipe size · [bold]x[/bold] clear · [bold]t[/bold] custom\n"
+        "  [bold]b[/bold] break setup back into singletons (with confirm)\n"
+        "  [bold]Enter[/bold] confirm · [bold]s[/bold] save draft · [bold]Esc[/bold] cancel\n"
         "\n"
         "[bold]Gestures[/bold]\n"
         "  Two error readings within 3s soft-delete the last good shot.\n"
