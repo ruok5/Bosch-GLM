@@ -86,3 +86,42 @@ def test_insert_history_treats_different_ref_edge_as_distinct(store):
     store.insert(addr, make_measurement(meas_id=100, ref_edge=0, result=2.628))
     other_edge = make_measurement(meas_id=200, ref_edge=2, result=2.628)
     assert store.insert_history(addr, other_edge) is True
+
+
+def test_break_setup_reverts_members_to_singletons(store):
+    """break_setup (#9 escape hatch) must strip setup_id, setup_label, and
+    setup_status from every member so each row becomes a clean singleton."""
+    addr = "AA:BB"
+    for mid in (1, 2, 3):
+        store.insert(addr, make_measurement(meas_id=mid, result=1.0 + mid),
+                     setup_id=42)
+    store.conn.execute(
+        "UPDATE measurements SET setup_label = 'bottom-of-beam', "
+        "setup_status = 'confirmed' WHERE setup_id = 42"
+    )
+    store.conn.commit()
+
+    affected = store.break_setup(42)
+    assert affected == 3
+
+    rows = store.conn.execute(
+        "SELECT meas_id, setup_id, setup_label, setup_status "
+        "FROM measurements WHERE device_address = ? ORDER BY meas_id",
+        (addr,),
+    ).fetchall()
+    assert len(rows) == 3
+    for r in rows:
+        assert r["setup_id"] is None
+        assert r["setup_label"] is None
+        assert r["setup_status"] is None
+
+
+def test_break_setup_leaves_other_setups_alone(store):
+    addr = "AA:BB"
+    store.insert(addr, make_measurement(meas_id=1, result=1.0), setup_id=10)
+    store.insert(addr, make_measurement(meas_id=2, result=2.0), setup_id=20)
+    store.break_setup(10)
+    other = store.conn.execute(
+        "SELECT setup_id FROM measurements WHERE meas_id = 2"
+    ).fetchone()
+    assert other["setup_id"] == 20

@@ -34,7 +34,7 @@ from ..protocol.messages import (
 from ..setup import SetupClosed, SetupTracker
 from ..sites import load_sites, nearest_site
 from ..store import LocationFix, Store
-from .screens import HelpScreen, SetupReviewScreen
+from .screens import HelpScreen, SetupReviewScreen, SingletonLabelScreen
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,11 @@ class GlmApp(App):
         self._setup_close_timer = None
         self._setup_open_at_ts_ms: int | None = None
         self._setup_countdown_timer = None
+        # Per-row metadata aligned with the #history DataTable: each entry is
+        # (meas_id, setup_id). Populated by _reload_history; read by
+        # action_review_setup to resolve the cursor row to a specific
+        # measurement/setup without needing row-key lookups.
+        self._row_meta: list[tuple[int, int | None]] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -303,6 +308,7 @@ class GlmApp(App):
     def _reload_history(self) -> None:
         table = self.query_one("#history", DataTable)
         table.clear()
+        self._row_meta = []
         sql = ("SELECT meas_id, dev_mode, result_m, captured_at, deleted_at, "
                "       setup_id, setup_label, setup_status "
                "FROM measurements")
@@ -326,12 +332,19 @@ class GlmApp(App):
                 set_col = Text("")
             elif status == "confirmed":
                 glyph = Text("●", style="bold green")
-                set_col = Text(f"…{sid % 1000:03d}", style="green")
+                set_col = Text(f"#{sid % 1000:03d}", style="green")
             else:
                 glyph = Text("◐", style="bold yellow")
-                set_col = Text(f"…{sid % 1000:03d}", style="yellow")
+                set_col = Text(f"#{sid % 1000:03d}", style="yellow")
             label_text = r["setup_label"] or ""
-            label_style = "green" if status == "confirmed" else "yellow"
+            if sid is None:
+                # Singleton labels get their own color so they read as
+                # "free-form annotation" rather than part of a setup palette.
+                label_style = "cyan"
+            elif status == "confirmed":
+                label_style = "green"
+            else:
+                label_style = "yellow"
             label_cell = Text(label_text, style=label_style if label_text else "")
             res_cell = Text(res_str)
             imp_cell = Text(imp_str)
@@ -342,6 +355,7 @@ class GlmApp(App):
                 if label_text:
                     label_cell.stylize("strike dim")
             table.add_row(glyph, ts, res_cell, imp_cell, set_col, label_cell)
+            self._row_meta.append((r["meas_id"], sid))
 
     # Textual DataTable has no insert-at-top API. For ~50 rows the cheapest
     # correct way to keep newest-first is to clear and re-query the store on
@@ -688,17 +702,49 @@ class GlmApp(App):
     # -- setup + soft-delete actions ----------------------------------------
 
     def action_review_setup(self) -> None:
+        """Dispatch on the selected row: setup rows open the slot editor, plain
+        rows (singletons) open a single-line label dialog, and if there's no
+        usable selection we fall back to "review the most recent closed
+        setup" for muscle-memory compatibility with the previous behavior.
+
+        Closes #9 (label singletons) and #13 (edit any setup, not just the
+        freshly-closed one)."""
+        target_meas_id, target_sid = self._resolve_cursor_target()
+
+        if target_sid is not None:
+            self._open_setup_review(target_sid)
+            return
+
+        if target_meas_id is not None:
+            self._open_singleton_label(target_meas_id)
+            return
+
+        # No usable cursor → legacy "review most recent" behavior.
         sid = self._last_closed_setup
         if sid is None:
-            # Maybe an open setup — close it manually for review
             close_ev = self.setup.force_close()
             if close_ev is None or len(close_ev.member_meas_ids) <= 1:
-                self.notify("No multi-member setup to review yet.",
+                self.notify("No setup or measurement selected.",
                             severity="warning")
                 if close_ev is not None:
                     self._handle_setup_singleton(close_ev)
                 return
             sid = close_ev.setup_id
+        self._open_setup_review(sid)
+
+    def _resolve_cursor_target(self) -> tuple[int | None, int | None]:
+        """Return (meas_id, setup_id) for the currently-highlighted row, or
+        (None, None) if there's no selection (empty table, no focus)."""
+        try:
+            table = self.query_one("#history", DataTable)
+        except Exception:
+            return None, None
+        idx = table.cursor_row
+        if idx is None or idx < 0 or idx >= len(self._row_meta):
+            return None, None
+        return self._row_meta[idx]
+
+    def _open_setup_review(self, sid: int) -> None:
         members = self.store.setup_members(sid)
         if not members:
             self.notify(f"No members for setup {sid}.", severity="warning")
@@ -719,7 +765,49 @@ class GlmApp(App):
             self._reload_history()
             self.setup_status = ""
 
-        self.push_screen(SetupReviewScreen(sid, members, apply_labels))
+        def break_setup() -> None:
+            self.store.break_setup(sid)
+            self.notify(f"Setup {sid} broken into {len(members)} singleton(s).")
+            if self._last_closed_setup == sid:
+                self._last_closed_setup = None
+            self._reload_history()
+            self.setup_status = ""
+
+        self.push_screen(SetupReviewScreen(sid, members, apply_labels,
+                                             on_break=break_setup))
+
+    def _open_singleton_label(self, meas_id: int) -> None:
+        if self.device_address is None:
+            self.notify("No device context — connect first to label.",
+                        severity="warning")
+            return
+        row = self.store.conn.execute(
+            "SELECT setup_label, result_m FROM measurements "
+            "WHERE device_address = ? AND meas_id = ?",
+            (self.device_address, meas_id),
+        ).fetchone()
+        if row is None:
+            self.notify(f"Measurement #{meas_id} not found.",
+                        severity="warning")
+            return
+        imperial = format_imperial(row["result_m"])
+
+        def _done(value: str | None) -> None:
+            if value is None:
+                return  # cancel
+            # Empty string clears the label; non-empty stores verbatim.
+            self.store.set_setup_label(self.device_address, meas_id,
+                                        value if value else None)
+            if value:
+                self.notify(f"Labeled #{meas_id}: {value}")
+            else:
+                self.notify(f"Cleared label on #{meas_id}.")
+            self._reload_history()
+
+        self.push_screen(
+            SingletonLabelScreen(meas_id, row["setup_label"], imperial),
+            _done,
+        )
 
     def action_toggle_deleted(self) -> None:
         self.show_deleted = not self.show_deleted
