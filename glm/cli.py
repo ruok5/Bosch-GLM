@@ -263,9 +263,12 @@ async def _run_headless(copy_format: str | None, offset_in: float,
         m = EDCMeasurement.from_payload(frame.payload)
         logger.debug("rx EDC %s: measID=%d devMode=%d refEdge=%d result=%.4f",
                      "live" if is_live_edc else "history", m.meas_id, m.dev_mode, m.ref_edge, m.result)
-        # Tee to catchup queue — it needs both kinds of frames (history for the
-        # actual responses, and result=0 ones to know when to stop).
-        if state["catchup_queue"] is not None:
+        # Only tee history RESPONSE frames to catchup. Live autosync frames
+        # must stay on the live path exclusively — otherwise an autosync
+        # frame arriving during catchup's wait_for gets consumed as "the
+        # response" for the current listIndex probe, shifting the scan
+        # off-by-one and dropping real history entries.
+        if is_history_response and state["catchup_queue"] is not None:
             state["catchup_queue"].put_nowait(m)
         if is_history_response:
             # Catchup task owns these — don't store or print here.
