@@ -796,10 +796,15 @@ class GlmApp(App):
             event.input.remove()
             return
         if event.input.id == "timeout-input":
+            raw = event.value.strip()
+            if not raw:
+                self.notify("Timeout unchanged (blank input).")
+                event.input.remove()
+                return
             try:
-                val = float(event.value)
+                val = float(raw)
                 if val < 1.0:
-                    raise ValueError("timeout must be ≥1s")
+                    raise ValueError("must be ≥1s")
             except ValueError as e:
                 self.notify(f"Invalid timeout: {e}", severity="error")
                 event.input.remove()
@@ -891,6 +896,15 @@ class GlmApp(App):
         target_meas_id, target_sid = self._resolve_cursor_target()
 
         if target_sid is not None:
+            # A lone shot whose provisional setup is still open shouldn't be
+            # treated as a setup yet — the row carries a setup_id only because
+            # SetupTracker opens one eagerly and revokes it on idle timeout (#19).
+            if (target_meas_id is not None
+                    and self.setup.is_open
+                    and self.setup._open_id == target_sid
+                    and self.setup.open_count == 1):
+                self._open_singleton_label(target_meas_id)
+                return
             self._open_setup_review(target_sid)
             return
 
