@@ -1053,7 +1053,21 @@ def tui() -> None:
                              "omit to use prefs (default 20s).")
     parser.add_argument("--no-gestures", action="store_true",
                         help="disable error-error soft-delete gesture detection")
+    parser.add_argument("--log-file", metavar="PATH",
+                        help="write DEBUG-level diagnostic log to PATH "
+                             "(the TUI owns stdout, so file is the only sink)")
     args = parser.parse_args()
+
+    if args.log_file:
+        # File-only: a StreamHandler would fight the Textual screen.
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        fh = logging.FileHandler(args.log_file, mode="w")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(name)s %(levelname)s: %(message)s"))
+        root.addHandler(fh)
+
     sites_path = Path(args.sites).expanduser() if args.sites else None
     from .tui.app import run_tui
     run_tui(offset_in=args.offset, catchup=args.catchup,
