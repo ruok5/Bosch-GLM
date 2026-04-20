@@ -1044,8 +1044,10 @@ def tui() -> None:
                         help="don't query macOS Location Services for geotagging")
     parser.add_argument("--sites", metavar="PATH",
                         help="JSON file of named sites for nearest-site matching")
-    parser.add_argument("--setup-idle-s", type=float, default=20.0,
-                        help="idle window for setup auto-close (default 20s)")
+    parser.add_argument("--setup-idle-s", type=float, default=None,
+                        help="idle window for setup auto-close in seconds. "
+                             "Overrides the persisted preference for this session; "
+                             "omit to use prefs (default 20s).")
     parser.add_argument("--no-gestures", action="store_true",
                         help="disable error-error soft-delete gesture detection")
     args = parser.parse_args()

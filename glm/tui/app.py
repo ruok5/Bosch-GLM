@@ -21,8 +21,9 @@ from .. import __version__, feedback
 from ..ble import CHAR_UUID, stream_frames
 from ..format import (
     IN_PER_M, copy_to_clipboard, displayed_inches, format_imperial,
-    format_imperial_quarter, fractional_inches, render_big,
+    format_imperial_at, format_imperial_quarter, fractional_inches, render_big,
 )
+from .. import prefs as prefs_mod
 from ..gestures import ErrorErrorTracker
 from ..protocol.constants import FrameType
 from ..protocol.frame import encode
@@ -101,6 +102,17 @@ class GlmApp(App):
         border-left: solid $boost;
     }
 
+    /* #7: below 100 cols the settings panel collapses and the table
+       takes full width. Toggled automatically by on_resize; can be
+       overridden via prefs.right_panel_collapsed. */
+    .lower.narrow DataTable { width: 1fr; }
+    .lower.narrow SettingsPanel { display: none; }
+
+    Input.timeout {
+        dock: bottom;
+        height: 3;
+    }
+
     Input.offset {
         dock: bottom;
         height: 3;
@@ -124,6 +136,8 @@ class GlmApp(App):
         Binding("l", "review_setup", "Review setup"),
         Binding("D", "toggle_deleted", "Show/hide deleted"),
         Binding("U", "undelete_last", "Undelete"),
+        Binding("P", "cycle_precision", "Precision"),
+        Binding("T", "set_timeout", "Setup timeout"),
         Binding("question_mark", "help", "Help"),
     ]
 
@@ -140,7 +154,7 @@ class GlmApp(App):
 
     def __init__(self, store: Store, offset_in: float = 0.0,
                  catchup: bool = True, use_location: bool = True,
-                 sites_path=None, setup_idle_s: float = 20.0,
+                 sites_path=None, setup_idle_s: float | None = None,
                  gestures: bool = True) -> None:
         super().__init__()
         self.store = store
@@ -153,8 +167,14 @@ class GlmApp(App):
         self.location: LocationFix | None = None
         self.site_name: str | None = None
         self._error_clear_timer = None
-        self.setup_idle_s = setup_idle_s
-        self.setup = SetupTracker(idle_window_ms=int(setup_idle_s * 1000))
+        # Load persistent UI preferences. CLI --setup-idle-s still wins for
+        # the session when it's passed explicitly (non-None); otherwise the
+        # prefs value (or its default) is used.
+        self.prefs = prefs_mod.load()
+        if setup_idle_s is not None:
+            self.prefs.setup_idle_s = setup_idle_s
+        self.setup_idle_s = self.prefs.setup_idle_s
+        self.setup = SetupTracker(idle_window_ms=int(self.setup_idle_s * 1000))
         self.err_tracker = ErrorErrorTracker(window_ms=3000) if gestures else None
         self._last_closed_setup: int | None = None
         self._setup_close_timer = None
@@ -174,13 +194,26 @@ class GlmApp(App):
 
     def on_mount(self) -> None:
         self.title = "Bosch GLM"
-        self.sub_title = f"v{__version__}  ·  offset {self.offset_in:+g}\""
+        self._refresh_sub_title()
         table = self.query_one("#history", DataTable)
         # First column is a setup-status glyph: blank for singletons,
         # ◐ draft setup (yellow), ● confirmed setup (green).
         table.add_columns(" ", "Time", "Result", "Imperial", "Setup", "Label")
         self._reload_history()
+        self._apply_panel_collapse()
+        # Render the baseline settings panel so the timeout + precision
+        # are visible even before device settings arrive.
+        self.watch_settings(None)
         self.run_worker(self._ble_loop(), exclusive=True, name="ble")
+
+    def _refresh_sub_title(self) -> None:
+        bits = [f"v{__version__}",
+                f"offset {self.offset_in:+g}\"",
+                f"prec {self.prefs.display_precision}\"",
+                f"timeout {self.setup_idle_s:g}s"]
+        if self.site_name:
+            bits.append(f"site {self.site_name}")
+        self.sub_title = "  ·  ".join(bits)
 
     # -- reactive watchers ---------------------------------------------------
 
@@ -210,7 +243,7 @@ class GlmApp(App):
             banner.add_class("hidden")
 
     def watch_offset_in(self, value: float) -> None:
-        self.sub_title = f"v{__version__}  ·  offset {value:+g}\""
+        self._refresh_sub_title()
         # Re-render the panel with the new offset applied.
         if self.last_measurement is not None:
             self._render_measurement(self.last_measurement)
@@ -221,13 +254,26 @@ class GlmApp(App):
         self._render_measurement(m)
 
     def watch_settings(self, s: DeviceSettings | None) -> None:
-        panel = self.query_one("#settings", SettingsPanel)
+        try:
+            panel = self.query_one("#settings", SettingsPanel)
+        except Exception:
+            return  # panel not mounted yet
+        # App prefs block is always visible — it stays current even before
+        # device settings arrive, and it's what the user is most likely
+        # interacting with via P/T.
+        app_block = [
+            "[bold]App prefs[/bold]",
+            f"Precision:    [cyan]{self.prefs.display_precision}\"[/cyan]  [dim](P to cycle)[/dim]",
+            f"Setup idle:   [cyan]{self.setup_idle_s:g}s[/cyan]  [dim](T to edit)[/dim]",
+        ]
         if s is None:
-            panel.update("[dim]settings not yet read[/dim]")
+            app_block.append("")
+            app_block.append("[dim]device settings not yet read[/dim]")
+            panel.update("\n".join(app_block))
             return
-        rows = [
-            "[bold]Device settings[/bold]",
+        dev_block = [
             "",
+            "[bold]Device settings[/bold]",
             f"Units:        {UNIT_NAMES.get(s.measurement_unit, str(s.measurement_unit))}",
             f"Angle:        {ANGLE_UNIT_NAMES.get(s.angle_unit, str(s.angle_unit))}",
             f"Laser:        {'on' if s.laser_pointer else 'off'}",
@@ -237,7 +283,7 @@ class GlmApp(App):
             f"Rotate disp:  {'on' if s.disp_rotation else 'off'}",
             f"Stored items: {s.last_used_list_index}",
         ]
-        panel.update("\n".join(rows))
+        panel.update("\n".join(app_block + dev_block))
 
     # -- helpers -------------------------------------------------------------
 
@@ -264,7 +310,8 @@ class GlmApp(App):
 
     def _render_measurement(self, m: EDCMeasurement, color: str = "cyan") -> None:
         adj_m = m.result + self.offset_in / IN_PER_M
-        imperial = format_imperial(adj_m)
+        precision = self.prefs.display_precision
+        imperial = format_imperial_at(adj_m, precision)
         big = render_big(imperial)
         ts = datetime.now().strftime("%H:%M:%S")
         if self.offset_in:
@@ -312,10 +359,11 @@ class GlmApp(App):
         sql += " ORDER BY captured_at DESC LIMIT ?"
         params.append(HISTORY_LIMIT)
         rows = self.store.conn.execute(sql, params).fetchall()
+        precision = self.prefs.display_precision
         for r in rows:
             ts = datetime.fromtimestamp(r["captured_at"] / 1000).strftime("%H:%M:%S")
             res_str = f"{r['result_m']:.4f} m"
-            imp_str = format_imperial(r["result_m"])
+            imp_str = format_imperial_at(r["result_m"], precision)
             # Setup glyph: blank for singletons (no group, no status), ◐ draft
             # (yellow), ● confirmed (green). Singletons have no draft/confirmed
             # lifecycle — they're just lone shots.
@@ -666,18 +714,90 @@ class GlmApp(App):
         prompt.focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "offset-input":
+        if event.input.id == "offset-input":
+            try:
+                self.offset_in = float(event.value) if event.value.strip() else 0.0
+                self.notify(f"Offset set to {self.offset_in:+g}\"")
+            except ValueError:
+                self.notify("Invalid number; offset unchanged.", severity="error")
+            event.input.remove()
             return
-        try:
-            self.offset_in = float(event.value) if event.value.strip() else 0.0
-            self.notify(f"Offset set to {self.offset_in:+g}\"")
-        except ValueError:
-            self.notify("Invalid number; offset unchanged.", severity="error")
-        event.input.remove()
+        if event.input.id == "timeout-input":
+            try:
+                val = float(event.value)
+                if val < 1.0:
+                    raise ValueError("timeout must be ≥1s")
+            except ValueError as e:
+                self.notify(f"Invalid timeout: {e}", severity="error")
+                event.input.remove()
+                return
+            self.setup_idle_s = val
+            self.prefs.setup_idle_s = val
+            prefs_mod.save(self.prefs)
+            # Rebuild the tracker so the new window takes effect immediately
+            # for the next setup. Existing open setup (if any) still uses
+            # the old window until it closes.
+            self.setup = SetupTracker(idle_window_ms=int(val * 1000))
+            self._refresh_sub_title()
+            self.watch_settings(self.settings)
+            self.notify(f"Setup timeout set to {val:g}s.")
+            event.input.remove()
+            return
 
     def action_refresh_history(self) -> None:
         self._reload_history()
         self.notify("History reloaded from store.")
+
+    def action_cycle_precision(self) -> None:
+        """Cycle through 1", 1/2", 1/4", 1/8" and persist the choice. #8."""
+        nxt = self.prefs.cycle_precision()
+        prefs_mod.save(self.prefs)
+        self._reload_history()
+        if self.last_measurement is not None:
+            self._render_measurement(self.last_measurement)
+        self._refresh_sub_title()
+        self.watch_settings(self.settings)
+        self.notify(f"Display precision: {nxt}\"")
+
+    def action_set_timeout(self) -> None:
+        """Prompt for a new setup-idle-seconds value. Persists to prefs. #6."""
+        existing = self.query("Input.timeout")
+        if existing:
+            existing.last().focus()
+            return
+        prompt = Input(
+            placeholder=f"setup timeout in seconds (current: {self.setup_idle_s:g})",
+            classes="timeout",
+            id="timeout-input",
+        )
+        self.mount(prompt)
+        prompt.focus()
+
+    # -- responsive layout ---------------------------------------------------
+
+    def on_resize(self, event) -> None:
+        self._apply_panel_collapse()
+
+    def _apply_panel_collapse(self) -> None:
+        """Toggle the `.narrow` class on the lower container so the right
+        settings panel hides on narrow terminals. #7. Threshold is 100 cols
+        to match the issue text; the prefs override (True/False) forces the
+        collapse state regardless of actual width."""
+        try:
+            lower = self.query_one(".lower")
+        except Exception:
+            return
+        override = self.prefs.right_panel_collapsed
+        if override is True:
+            narrow = True
+        elif override is False:
+            narrow = False
+        else:
+            narrow = self.size.width < 100
+        if narrow:
+            lower.add_class("narrow")
+        else:
+            lower.remove_class("narrow")
 
     def action_fetch_settings(self) -> None:
         if self.client is None:
@@ -741,7 +861,10 @@ class GlmApp(App):
 
 def run_tui(offset_in: float = 0.0, catchup: bool = True,
             use_location: bool = True, sites_path=None,
-            setup_idle_s: float = 20.0, gestures: bool = True) -> None:
+            setup_idle_s: float | None = None, gestures: bool = True) -> None:
+    """`setup_idle_s=None` means "use the persisted preference"; an explicit
+    value (e.g. from the CLI --setup-idle-s flag) overrides prefs for the
+    session."""
     store = Store()
     try:
         GlmApp(store=store, offset_in=offset_in, catchup=catchup,
