@@ -1,0 +1,61 @@
+name: GLMWedge
+options:
+  bundleIdPrefix: org.fyvm
+  deploymentTarget:
+    macOS: "15.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: 43JT6B83AS
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Apple Development"
+    ENABLE_HARDENED_RUNTIME: NO
+    ENABLE_APP_SANDBOX: NO       # writes ~/.glm and posts mouse events
+
+targets:
+  GLMWedge:
+    type: application
+    platform: macOS
+    sources:
+      - GLMWedge
+    info:
+      path: GLMWedge/Info.plist
+      properties:
+        CFBundleDisplayName: GLM Wedge
+        LSApplicationCategoryType: public.app-category.utilities
+        NSBluetoothAlwaysUsageDescription: >-
+          GLM Wedge connects to your Bosch GLM over Bluetooth and logs each
+          measurement to ~/.glm/shots.log for AutoCAD.
+    settings:
+      base:
+        PRODUCT_NAME: GLM Wedge
+        PRODUCT_MODULE_NAME: GLMWedge
+        PRODUCT_BUNDLE_IDENTIFIER: org.fyvm.glmwedge
+
+  # Logic only, no host app: the tests never start Bluetooth.
+  GLMWedgeTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+      - GLMWedge/ShotLog.swift
+      - GLMWedge/Wedge.swift
+      - GLMWedge/Protocol
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.fyvm.glmwedge.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  GLMWedge:
+    build:
+      targets:
+        GLMWedge: all
+    test:
+      targets:
+        - GLMWedgeTests

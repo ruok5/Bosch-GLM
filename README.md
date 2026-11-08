@@ -37,7 +37,7 @@ Tested on a Bosch GLM165-27C6 on macOS. Should work on any GLM in the
   device's `meas_id`. Default location:
   `~/Library/Application Support/bosch-glm/measurements.sqlite`
 - **Catchup** (`--catchup`): on each (re)connect, walk the device's
-  on-device history list (last ~63 measurements) and recover any rows
+  on-device history list (last 30 measurements) and recover any rows
   not yet in the local store. Value-tuple dedup means re-runs don't
   duplicate.
 - **Error detection**: GLM error responses (`devMode 63`, returning
@@ -262,6 +262,39 @@ python export.py --format attribs -o /tmp/attribs.csv
 python export.py --format attribs --include-drafts
 ```
 
+### Wedge (shot log for LASER.lsp)
+
+The wedge is a Mac app: **GLM Wedge**, in `mac/` (build and permissions
+in `mac/README.md`). Open it to log, close it to stop. While it's open
+it appends every shot to `~/.glm/shots.log` for the AutoLISP `LASER`
+command, which places blocks from it. One tab-separated line per shot:
+
+```
+seq    YYYY-MM-DDTHH:MM:SS    inches|ERR|GAP    live|recovered    [meas_id]
+```
+
+- `seq` never goes backwards. It is kept in `~/.glm/wedge.json` as
+  well as in the log, so clearing the log doesn't restart it.
+- Only single-distance shots and errors are logged. Every `ERR` is kept:
+  LASER reads two adjacent ERR lines as a reset.
+- On each reconnect the device history is lined up against the log tail
+  by sequence, and only the missing shots are appended, as `recovered`,
+  oldest first. Shots taken while that runs are appended after them as
+  `live`. If more shots were taken than the device keeps, a `GAP` line
+  goes ahead of the recovered ones.
+- The first-ever connect records a baseline and backfills nothing.
+- `meas_id` (live lines only) is the device's message counter, for
+  debugging. It isn't a shot identity.
+- Beeps: one when a live shot is logged, two when a catch-up recovered
+  shots.
+- Doorbell: when AutoCAD is frontmost and the mouse has been still for
+  2 s, the cursor moves one pixel right and back, which wakes LASER's
+  `grread` loop. It needs Accessibility for GLM Wedge, and never presses
+  a key.
+
+The log contract is shared with `~/development/AutoLISP` (LASER.lsp).
+Change it there first.
+
 ### Error-error gesture
 
 While streaming, if you take a measurement you don't want, fire two
@@ -303,6 +336,7 @@ export.py          # shim → glm.export:export_main
 notes.py           # shim → glm.notes:notes_main
 station.py         # shim → glm.station:station_main
 docs/              # design notes
+mac/               # GLM Wedge, the Mac app that writes ~/.glm/shots.log
 tests/             # pytest suite (83 tests)
 ```
 
