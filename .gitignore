@@ -3,3 +3,26 @@ __pycache__/
 *.pyc
 .claude/
 reverse/
+
+# OS clutter
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*~
+# Editor swap and backup files
+*.swp
+*.swo
+*.bak
+*.tmp
+# Office and AutoCAD lock and autosave files
+~$*
+*.dwl
+*.dwl2
+*.sv$
+# Logs and local secrets
+*.log
+.env
+.env.*
+!.env.example
